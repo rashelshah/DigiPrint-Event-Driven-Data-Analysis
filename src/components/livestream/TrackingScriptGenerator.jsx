@@ -6,18 +6,22 @@ const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
 /**
- * Tracking Script Generator — Google Analytics–style install flow.
- * 1. User enters website URL
- * 2. Domain is extracted & registered in Supabase
- * 3. A script snippet is generated for copy-paste
+ * Unified Tracking Script Generator — 3-step flow:
+ * Step 1: Enter URL → Generate Script
+ * Step 2: View script + Copy → Start Monitoring
+ * Step 3: Monitoring active (banner collapses)
  */
-const TrackingScriptGenerator = ({ onSiteRegistered }) => {
+const TrackingScriptGenerator = ({ onSiteRegistered, onStartMonitoring }) => {
   const [url, setUrl] = useState('');
   const [domain, setDomain] = useState('');
   const [script, setScript] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [isMonitoring, setIsMonitoring] = useState(false);
+
+  // Step logic
+  const step = isMonitoring ? 3 : script ? 2 : 1;
 
   const handleGenerate = async (e) => {
     e.preventDefault();
@@ -25,13 +29,14 @@ const TrackingScriptGenerator = ({ onSiteRegistered }) => {
     setScript('');
     setDomain('');
     setCopied(false);
+    setIsMonitoring(false);
 
     if (!url.trim()) {
       setError('Please enter a website URL');
       return;
     }
 
-    // ── Extract domain ──────────────────────────────────────
+    // Extract domain
     let extractedDomain;
     try {
       let normalizedUrl = url.trim();
@@ -48,11 +53,20 @@ const TrackingScriptGenerator = ({ onSiteRegistered }) => {
     setLoading(true);
 
     try {
-      // ── Register site in Supabase ───────────────────────────
+      // Get the current user's ID for owner_id
+      const { data: { user } } = await supabase.auth.getUser();
+      const ownerId = user?.id || null;
+
+      // Register site in Supabase with owner_id
       const { error: insertError } = await supabase
         .from('sites')
         .upsert(
-          { site_name: extractedDomain, domain: extractedDomain, is_active: true },
+          {
+            site_name: extractedDomain,
+            domain: extractedDomain,
+            is_active: true,
+            owner_id: ownerId,
+          },
           { onConflict: 'domain', ignoreDuplicates: true }
         );
 
@@ -63,13 +77,11 @@ const TrackingScriptGenerator = ({ onSiteRegistered }) => {
 
       setDomain(extractedDomain);
 
-      // ── Generate snippet ────────────────────────────────────
+      // Generate snippet
       const trackerUrl = `${window.location.origin}/tracker.js`;
       const snippet = `<script\n  src="${trackerUrl}"\n  data-domain="${extractedDomain}"\n  data-supabase-url="${SUPABASE_URL}"\n  data-supabase-key="${SUPABASE_ANON_KEY}">\n</script>`;
 
       setScript(snippet);
-
-      // Notify parent to refresh sites list
       onSiteRegistered?.();
     } catch (err) {
       setError(err.message || 'Failed to register site');
@@ -84,7 +96,6 @@ const TrackingScriptGenerator = ({ onSiteRegistered }) => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2500);
     } catch {
-      // Fallback: select text
       const textarea = document.createElement('textarea');
       textarea.value = script;
       document.body.appendChild(textarea);
@@ -96,6 +107,21 @@ const TrackingScriptGenerator = ({ onSiteRegistered }) => {
     }
   };
 
+  const handleStartMonitoring = () => {
+    setIsMonitoring(true);
+    onStartMonitoring?.(domain);
+  };
+
+  const handleReset = () => {
+    setUrl('');
+    setDomain('');
+    setScript('');
+    setError('');
+    setCopied(false);
+    setIsMonitoring(false);
+    onStartMonitoring?.(null);
+  };
+
   return (
     <motion.div
       className="glass-strong rounded-xl border border-white/10 overflow-hidden"
@@ -104,51 +130,110 @@ const TrackingScriptGenerator = ({ onSiteRegistered }) => {
       transition={{ duration: 0.3 }}
     >
       {/* Header */}
-      <div className="px-5 py-4 border-b border-white/10 flex items-center gap-3">
-        <span className="text-lg">🔗</span>
-        <div>
-          <h3 className="text-lg font-semibold text-white">Track Your Website</h3>
-          <p className="text-xs text-gray-400">
-            Enter your website URL to generate a tracking script
-          </p>
+      <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <span className="text-lg">{step === 3 ? '📡' : '🔗'}</span>
+          <div>
+            <h3 className="text-lg font-semibold text-white">
+              {step === 3 ? 'Live Monitoring' : 'Track Your Website'}
+            </h3>
+            <p className="text-xs text-gray-400">
+              {step === 1 && 'Enter your website URL to generate a tracking script'}
+              {step === 2 && 'Copy the script and install it on your website'}
+              {step === 3 && `Monitoring live events from ${domain}`}
+            </p>
+          </div>
+        </div>
+
+        {/* Step indicators */}
+        <div className="hidden sm:flex items-center gap-2">
+          {[1, 2, 3].map((s) => (
+            <div
+              key={s}
+              className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold transition-all ${
+                s === step
+                  ? 'bg-cyber-500 text-dark-950'
+                  : s < step
+                    ? 'bg-cyber-500/30 text-cyber-400'
+                    : 'bg-white/10 text-gray-500'
+              }`}
+            >
+              {s < step ? '✓' : s}
+            </div>
+          ))}
         </div>
       </div>
 
-      {/* Form */}
-      <div className="p-5">
-        <form onSubmit={handleGenerate} className="flex flex-col sm:flex-row gap-3">
-          <div className="flex-1">
-            <input
-              type="text"
-              value={url}
-              onChange={(e) => { setUrl(e.target.value); setError(''); }}
-              placeholder="https://your-website.com"
-              className="w-full px-4 py-2.5 bg-white/5 border border-white/10 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-cyber-500/50 focus:ring-1 focus:ring-cyber-500/30 transition-all font-mono text-sm"
-            />
-            {error && (
-              <p className="text-red-400 text-xs mt-1.5">{error}</p>
-            )}
+      {/* Step 3: Monitoring active — compact */}
+      {step === 3 && (
+        <div className="px-5 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <span className="w-2.5 h-2.5 bg-green-400 rounded-full animate-pulse" />
+            <span className="text-sm text-green-400">
+              Monitoring: <span className="font-mono font-medium">{domain}</span>
+            </span>
           </div>
           <button
-            type="submit"
-            disabled={loading}
-            className="px-5 py-2.5 bg-cyber-500 text-dark-950 font-medium rounded-lg hover:bg-cyber-400 hover:shadow-glow transition-all duration-200 active:scale-95 text-sm whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
+            onClick={handleReset}
+            className="px-4 py-2 glass text-gray-300 rounded-lg hover:bg-white/10 transition-all text-sm active:scale-95"
           >
-            {loading ? (
-              <span className="flex items-center gap-2">
-                <span className="w-4 h-4 border-2 border-dark-950 border-t-transparent rounded-full animate-spin" />
-                Registering...
-              </span>
-            ) : (
-              '🚀 Generate Tracking Script'
-            )}
+            Change Website
           </button>
-        </form>
-      </div>
+        </div>
+      )}
 
-      {/* Generated Script Output */}
+      {/* Step 1: URL Input */}
+      {step < 3 && (
+        <div className="p-5">
+          <form onSubmit={handleGenerate} className="flex flex-col sm:flex-row gap-3">
+            <div className="flex-1">
+              <input
+                type="text"
+                value={url}
+                onChange={(e) => { setUrl(e.target.value); setError(''); }}
+                placeholder="https://your-website.com"
+                disabled={step === 2}
+                className="w-full px-4 py-2.5 bg-white/5 border border-white/10 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-cyber-500/50 focus:ring-1 focus:ring-cyber-500/30 transition-all font-mono text-sm disabled:opacity-50"
+              />
+              {error && (
+                <p className="text-red-400 text-xs mt-1.5">{error}</p>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <button
+                type="submit"
+                disabled={loading || step === 2}
+                className="px-5 py-2.5 bg-cyber-500 text-dark-950 font-medium rounded-lg hover:bg-cyber-400 hover:shadow-glow transition-all duration-200 active:scale-95 text-sm whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {loading ? (
+                  <span className="flex items-center gap-2">
+                    <span className="w-4 h-4 border-2 border-dark-950 border-t-transparent rounded-full animate-spin" />
+                    Registering...
+                  </span>
+                ) : (
+                  '🚀 Generate Script'
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={handleStartMonitoring}
+                disabled={step !== 2}
+                className={`px-5 py-2.5 font-medium rounded-lg transition-all duration-200 active:scale-95 text-sm whitespace-nowrap ${
+                  step === 2
+                    ? 'bg-green-500 text-white hover:bg-green-400 hover:shadow-[0_0_20px_rgba(34,197,94,0.4)]'
+                    : 'bg-white/5 text-gray-500 cursor-not-allowed'
+                }`}
+              >
+                📡 Start Monitoring
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Step 2: Generated Script Output */}
       <AnimatePresence>
-        {script && (
+        {step === 2 && script && (
           <motion.div
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: 'auto', opacity: 1 }}
@@ -200,7 +285,7 @@ const TrackingScriptGenerator = ({ onSiteRegistered }) => {
                 <ol className="text-xs text-gray-500 space-y-1 list-decimal list-inside">
                   <li>Copy the script above</li>
                   <li>Paste it into your website's <code className="text-cyber-400 bg-white/5 px-1 rounded">&lt;head&gt;</code> tag</li>
-                  <li>Deploy your site — events will appear here automatically</li>
+                  <li>Click <strong className="text-green-400">Start Monitoring</strong> to begin tracking events</li>
                 </ol>
               </div>
             </div>

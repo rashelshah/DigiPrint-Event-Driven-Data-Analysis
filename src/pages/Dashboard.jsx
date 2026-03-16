@@ -17,12 +17,19 @@ const POLL_INTERVAL = 30_000; // 30s
 
 const eventTypeColors = {
   login: 'bg-green-500/20 text-green-400 border-green-500/30',
+  logout: 'bg-orange-500/20 text-orange-400 border-orange-500/30',
   click: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
   search: 'bg-purple-500/20 text-purple-400 border-purple-500/30',
   api_call: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30',
   page_view: 'bg-cyan-500/20 text-cyan-400 border-cyan-500/30',
   session_start: 'bg-pink-500/20 text-pink-400 border-pink-500/30',
   session_end: 'bg-red-500/20 text-red-400 border-red-500/30',
+  scroll: 'bg-indigo-500/20 text-indigo-400 border-indigo-500/30',
+  form_submit: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
+  navigation: 'bg-sky-500/20 text-sky-400 border-sky-500/30',
+  hover: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
+  download: 'bg-teal-500/20 text-teal-400 border-teal-500/30',
+  external_link_click: 'bg-rose-500/20 text-rose-400 border-rose-500/30',
 };
 
 const formatTime = (ts) => {
@@ -45,20 +52,23 @@ const Dashboard = () => {
 
   const loadData = useCallback(async () => {
     try {
-      const [summaryData, rateData, sitesData, typesData, eventsData] = await Promise.all([
+      // Fetch each independently so one failure doesn't break everything
+      const results = await Promise.allSettled([
         fetchDashboardSummary(),
         fetchEventRate(),
         fetchSiteAnalytics(),
         fetchTopEventTypes(),
-        fetchLiveEvents({ limit: 10 }),
+        fetchLiveEvents({ limit: 20 }),
       ]);
 
-      setSummary(summaryData);
-      setEventRate(rateData);
-      setSiteAnalytics(sitesData);
-      setTopEventTypes(typesData);
-      setRecentEvents(eventsData);
-      setError(null);
+      setSummary(results[0].status === 'fulfilled' ? results[0].value : null);
+      setEventRate(results[1].status === 'fulfilled' ? results[1].value : { events_per_second: 0 });
+      setSiteAnalytics(results[2].status === 'fulfilled' ? results[2].value : []);
+      setTopEventTypes(results[3].status === 'fulfilled' ? results[3].value : []);
+      setRecentEvents(results[4].status === 'fulfilled' ? results[4].value : []);
+
+      const errors = results.filter(r => r.status === 'rejected');
+      setError(errors.length ? `${errors.length} queries failed` : null);
     } catch (err) {
       console.error('Dashboard fetch error:', err);
       setError(err.message || 'Failed to load dashboard data');

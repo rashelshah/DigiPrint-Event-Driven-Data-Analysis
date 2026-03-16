@@ -1,11 +1,26 @@
-import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { useState } from 'react';
-import ModeToggle from './ui/ModeToggle';
+import { useAuth } from '../context/AuthContext';
 
 const Navigation = () => {
     const location = useLocation();
+    const navigate = useNavigate();
     const [isOpen, setIsOpen] = useState(false);
+
+    // Don't render nav on auth pages
+    const isAuthPage = ['/login', '/signup'].includes(location.pathname);
+    if (isAuthPage) return null;
+
+    let user = null;
+    let signOut = null;
+    try {
+        const auth = useAuth();
+        user = auth.user;
+        signOut = auth.signOut;
+    } catch {
+        // AuthProvider may not be ready yet
+    }
 
     const navItems = [
         { path: '/', label: 'Home' },
@@ -14,18 +29,25 @@ const Navigation = () => {
         { path: '/analytics', label: 'Analytics' },
         { path: '/anomalies', label: 'Anomalies' },
         { path: '/query-playground', label: 'SQL Playground' },
-        { path: '/architecture', label: 'Architecture' },
-        { path: '/case-study', label: 'Case Study' },
     ];
 
     const isActive = (path) => location.pathname === path;
 
+    const handleLogout = async () => {
+        try {
+            await signOut?.();
+            navigate('/login');
+        } catch (err) {
+            console.error('Logout failed:', err);
+        }
+    };
+
     return (
         <nav className="sticky top-0 z-50 glass-strong border-b border-white/10">
-            <div className="container mx-auto px-6 py-4">
-                <div className="flex items-center justify-between">
+            <div className="container mx-auto px-6">
+                <div className="flex items-center justify-between h-16">
                     {/* Logo */}
-                    <Link to="/" className="flex items-center gap-2">
+                    <Link to="/" className="flex items-center gap-2.5 shrink-0">
                         <div className="w-8 h-8 bg-cyber-500 rounded-lg flex items-center justify-center">
                             <span className="text-dark-950 font-bold text-xl">D</span>
                         </div>
@@ -35,11 +57,11 @@ const Navigation = () => {
                     </Link>
 
                     {/* Desktop Navigation */}
-                    <div className="hidden md:flex items-center gap-1">
+                    <div className="hidden lg:flex items-center gap-1">
                         {navItems.map((item) => (
                             <Link key={item.path} to={item.path}>
                                 <motion.div
-                                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${isActive(item.path)
+                                    className={`px-3 py-2 rounded-lg text-sm font-medium transition-all ${isActive(item.path)
                                             ? 'bg-cyber-500/20 text-cyber-400 border border-cyber-500/50'
                                             : 'text-gray-400 hover:text-white hover:bg-white/5'
                                         }`}
@@ -52,15 +74,35 @@ const Navigation = () => {
                         ))}
                     </div>
 
-                    {/* Mode Toggle */}
-                    <div className="hidden md:block">
-                        <ModeToggle />
+                    {/* Right: User Info */}
+                    <div className="hidden lg:flex items-center gap-3">
+                        {user && (
+                            <div className="flex items-center gap-3">
+                                <span className="text-sm text-gray-400 truncate max-w-[180px]" title={user.email}>
+                                    {user.email}
+                                </span>
+                                <button
+                                    onClick={handleLogout}
+                                    className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20 transition-all active:scale-95"
+                                >
+                                    Logout
+                                </button>
+                            </div>
+                        )}
+                        {!user && (
+                            <Link
+                                to="/login"
+                                className="px-4 py-1.5 rounded-lg text-sm font-medium bg-cyber-500/20 text-cyber-400 border border-cyber-500/50 hover:bg-cyber-500/30 transition-all"
+                            >
+                                Login
+                            </Link>
+                        )}
                     </div>
 
                     {/* Mobile Menu Button */}
                     <button
                         onClick={() => setIsOpen(!isOpen)}
-                        className="md:hidden p-2 rounded-lg hover:bg-white/10"
+                        className="lg:hidden p-2 rounded-lg hover:bg-white/10"
                     >
                         <svg
                             className="w-6 h-6"
@@ -90,7 +132,7 @@ const Navigation = () => {
                 {/* Mobile Menu */}
                 {isOpen && (
                     <motion.div
-                        className="md:hidden mt-4 pb-4 space-y-2"
+                        className="lg:hidden pb-4 space-y-1"
                         initial={{ opacity: 0, height: 0 }}
                         animate={{ opacity: 1, height: 'auto' }}
                         exit={{ opacity: 0, height: 0 }}
@@ -111,8 +153,29 @@ const Navigation = () => {
                                 </div>
                             </Link>
                         ))}
-                        <div className="pt-4 border-t border-white/10">
-                            <ModeToggle />
+                        <div className="pt-3 border-t border-white/10">
+                            {user && (
+                                <div className="flex items-center justify-between px-4 py-2">
+                                    <span className="text-sm text-gray-400 truncate max-w-[200px]">
+                                        {user.email}
+                                    </span>
+                                    <button
+                                        onClick={() => { handleLogout(); setIsOpen(false); }}
+                                        className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20 transition-all"
+                                    >
+                                        Logout
+                                    </button>
+                                </div>
+                            )}
+                            {!user && (
+                                <Link
+                                    to="/login"
+                                    onClick={() => setIsOpen(false)}
+                                    className="block mx-4 text-center px-4 py-2 rounded-lg text-sm font-medium bg-cyber-500/20 text-cyber-400 border border-cyber-500/50"
+                                >
+                                    Login
+                                </Link>
+                            )}
                         </div>
                     </motion.div>
                 )}

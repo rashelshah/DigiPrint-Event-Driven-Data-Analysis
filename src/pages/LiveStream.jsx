@@ -2,7 +2,6 @@ import { motion } from 'framer-motion';
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { pageVariants } from '../utils/animations';
 import GlassCard from '../components/ui/GlassCard';
-import URLTrackerInput from '../components/livestream/URLTrackerInput';
 import SiteFilter from '../components/livestream/SiteFilter';
 import LiveEventFeed from '../components/livestream/LiveEventFeed';
 import EventDetailsModal from '../components/livestream/EventDetailsModal';
@@ -93,14 +92,9 @@ const LiveStream = () => {
     if (isPaused) return;
 
     const channel = subscribeLiveEvents((newEvent) => {
-      // Skip if filtered domain doesn't match
-      if (activeDomain && newEvent.site_id) {
-        // We'll still add it and let the backend view filter handle next refresh
-      }
-
       const eventId = newEvent.id || newEvent.event_id || Date.now();
 
-      // Prepend and trim to 100 (point #6)
+      // Prepend and trim to 100
       setEvents((prev) => {
         const enriched = {
           event_id: eventId,
@@ -115,7 +109,7 @@ const LiveStream = () => {
         return [enriched, ...prev].slice(0, 100);
       });
 
-      // Highlight new event (point #4 — flash green then fade)
+      // Highlight new event
       setHighlightIds((prev) => new Set([...prev, eventId]));
       highlightTimerRef.current[eventId] = setTimeout(() => {
         setHighlightIds((prev) => {
@@ -131,24 +125,23 @@ const LiveStream = () => {
 
     return () => {
       unsubscribeChannel(channel);
-      // Clear all highlight timers
       Object.values(highlightTimerRef.current).forEach(clearTimeout);
       highlightTimerRef.current = {};
     };
   }, [isPaused, activeDomain]);
 
   // ─── Handlers ─────────────────────────────────────────────
-  const handleTrackDomain = (domain) => {
+  const handleStartMonitoring = (domain) => {
     setTrackedDomain(domain);
     if (domain) {
-      setSiteFilter(null); // URL tracker overrides site filter
+      setSiteFilter(null);
     }
   };
 
   const handleSiteFilterChange = (domain) => {
     setSiteFilter(domain);
     if (domain) {
-      setTrackedDomain(null); // site filter clears URL tracker
+      setTrackedDomain(null);
     }
   };
 
@@ -167,14 +160,12 @@ const LiveStream = () => {
           <p className="text-gray-400">Real-time event monitoring across tracked websites</p>
         </div>
 
-        {/* Tracking Script Generator */}
+        {/* Unified Tracking Script Generator + Monitoring */}
         <div className="mb-4">
-          <TrackingScriptGenerator onSiteRegistered={refreshSites} />
-        </div>
-
-        {/* URL Tracker — filter events by domain */}
-        <div className="mb-4">
-          <URLTrackerInput onTrack={handleTrackDomain} currentDomain={trackedDomain} />
+          <TrackingScriptGenerator
+            onSiteRegistered={refreshSites}
+            onStartMonitoring={handleStartMonitoring}
+          />
         </div>
 
         {/* Controls Row: Filters + Counter */}

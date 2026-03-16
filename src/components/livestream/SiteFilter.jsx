@@ -11,23 +11,22 @@ const eventTypes = [
   'all',
   'page_view',
   'click',
+  'scroll',
+  'form_submit',
+  'navigation',
   'search',
+  'hover',
+  'download',
+  'external_link_click',
   'api_call',
   'login',
+  'logout',
   'session_start',
   'session_end',
 ];
 
 /**
  * Filter bar for Live Stream: site dropdown, event type, time range.
- * Props:
- *   sites           - array of { id, site_name, domain }
- *   selectedSite    - current domain string or null
- *   onSiteChange    - callback(domain)
- *   selectedType    - current event type
- *   onTypeChange    - callback(type)
- *   selectedRange   - minutes number or null
- *   onRangeChange   - callback(minutes)
  */
 const SiteFilter = ({
   sites = [],
@@ -39,7 +38,7 @@ const SiteFilter = ({
   onRangeChange,
 }) => {
   const selectClasses =
-    'px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-gray-200 focus:outline-none focus:border-cyber-500/50 focus:ring-1 focus:ring-cyber-500/30 transition-all appearance-none cursor-pointer';
+    'px-3 py-2 bg-dark-900 border border-white/10 rounded-lg text-sm text-gray-200 focus:outline-none focus:border-cyber-500/50 focus:ring-1 focus:ring-cyber-500/30 transition-all appearance-none cursor-pointer';
 
   return (
     <motion.div
@@ -55,6 +54,7 @@ const SiteFilter = ({
           value={selectedSite || ''}
           onChange={(e) => onSiteChange(e.target.value || null)}
           className={selectClasses}
+          style={{ colorScheme: 'dark' }}
         >
           <option value="">All Sites</option>
           {sites.map((s) => (
@@ -72,6 +72,7 @@ const SiteFilter = ({
           value={selectedType || 'all'}
           onChange={(e) => onTypeChange(e.target.value)}
           className={selectClasses}
+          style={{ colorScheme: 'dark' }}
         >
           {eventTypes.map((type) => (
             <option key={type} value={type}>

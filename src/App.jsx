@@ -3,10 +3,14 @@ import { AnimatePresence } from 'framer-motion';
 import { useEffect, useState } from 'react';
 import Navigation from './components/Navigation';
 import { ModeProvider } from './components/ui/ModeToggle';
+import { AuthProvider } from './context/AuthContext';
+import ProtectedRoute from './components/ProtectedRoute';
 import socketService from './services/socketService';
 
 // Pages
 import Landing from './pages/Landing';
+import LoginPage from './pages/login';
+import SignupPage from './pages/signup';
 import Dashboard from './pages/Dashboard';
 import LiveStream from './pages/LiveStream';
 import Analytics from './pages/Analytics';
@@ -39,30 +43,38 @@ function App() {
   }, []);
 
   return (
-    <ModeProvider>
-      <Router>
-        <div className="min-h-screen bg-dark-950 text-gray-100">
-          <Navigation />
+    <AuthProvider>
+      <ModeProvider>
+        <Router>
+          <div className="min-h-screen bg-dark-950 text-gray-100">
+            <Navigation />
 
-          <AnimatePresence mode="wait">
-            <Routes>
-              <Route path="/" element={<Landing />} />
-              <Route path="/dashboard" element={<Dashboard />} />
-              <Route path="/live-stream" element={<LiveStream />} />
-              <Route path="/analytics" element={<Analytics />} />
-              <Route path="/user-analytics" element={<UserAnalytics />} />
-              <Route path="/event-replay" element={<EventReplay />} />
-              <Route path="/anomalies" element={<AnomalyDetection />} />
-              <Route path="/architecture" element={<ArchitectureViz />} />
-              <Route path="/query-playground" element={<QueryPlayground />} />
-              <Route path="/privacy" element={<Privacy />} />
-              <Route path="/case-study" element={<CaseStudy />} />
-              <Route path="*" element={<Navigate to="/" replace />} />
-            </Routes>
-          </AnimatePresence>
-        </div>
-      </Router>
-    </ModeProvider>
+            <AnimatePresence mode="wait">
+              <Routes>
+                {/* Public routes */}
+                <Route path="/" element={<Landing />} />
+                <Route path="/login" element={<LoginPage />} />
+                <Route path="/signup" element={<SignupPage />} />
+                <Route path="/architecture" element={<ArchitectureViz />} />
+                <Route path="/privacy" element={<Privacy />} />
+                <Route path="/case-study" element={<CaseStudy />} />
+
+                {/* Protected routes */}
+                <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
+                <Route path="/live-stream" element={<ProtectedRoute><LiveStream /></ProtectedRoute>} />
+                <Route path="/analytics" element={<ProtectedRoute><Analytics /></ProtectedRoute>} />
+                <Route path="/user-analytics" element={<ProtectedRoute><UserAnalytics /></ProtectedRoute>} />
+                <Route path="/event-replay" element={<ProtectedRoute><EventReplay /></ProtectedRoute>} />
+                <Route path="/anomalies" element={<ProtectedRoute><AnomalyDetection /></ProtectedRoute>} />
+                <Route path="/query-playground" element={<ProtectedRoute><QueryPlayground /></ProtectedRoute>} />
+
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+            </AnimatePresence>
+          </div>
+        </Router>
+      </ModeProvider>
+    </AuthProvider>
   );
 }
 
