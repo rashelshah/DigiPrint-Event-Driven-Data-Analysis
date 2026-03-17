@@ -129,6 +129,7 @@ const getEventDescription = (event) => {
       if (meta.depth) return `User scrolled ${meta.depth}% of ${pageName}`;
       return `User scrolled the page`;
     case 'form_submit':
+      if (meta.form_id) return `User submitted form "${meta.form_id}" on ${pageName}`;
       if (meta.formId) return `User submitted form "${meta.formId}" on ${pageName}`;
       return `User submitted a form on ${pageName}`;
     case 'navigation':

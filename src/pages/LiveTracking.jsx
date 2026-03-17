@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { pageVariants } from '../utils/animations';
 import GlassCard from '../components/ui/GlassCard';
 import SiteFilter from '../components/livestream/SiteFilter';
@@ -9,20 +9,41 @@ import EventCounter from '../components/livestream/EventCounter';
 import TrackingScriptGenerator from '../components/livestream/TrackingScriptGenerator';
 import {
   fetchLiveEvents,
-  fetchSitesList,
+  fetchUserSites,
   fetchEventRate,
+  fetchNewEvents,
   subscribeLiveEvents,
   unsubscribeChannel,
 } from '../api/queries';
 
+const LIVE_LIMIT = 100;
+const POLL_INTERVAL_MS = 2000;
+
+function getIndiaNowIso() {
+  const formatter = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(new Date());
+  const map = {};
+  parts.forEach((part) => {
+    if (part.type !== 'literal') map[part.type] = part.value;
+  });
+  return `${map.year}-${map.month}-${map.day}T${map.hour}:${map.minute}:${map.second}+05:30`;
+}
+
 const LiveTracking = () => {
-  // Filter state
-  const [trackedDomain, setTrackedDomain] = useState(null);
+  const [trackedSite, setTrackedSite] = useState(null);
   const [siteFilter, setSiteFilter] = useState(null);
   const [eventTypeFilter, setEventTypeFilter] = useState('all');
   const [timeRange, setTimeRange] = useState(null);
 
-  // Data state
   const [events, setEvents] = useState([]);
   const [sites, setSites] = useState([]);
   const [eventRate, setEventRate] = useState(0);
@@ -31,48 +52,158 @@ const LiveTracking = () => {
   const [loading, setLoading] = useState(true);
   const [isPaused, setIsPaused] = useState(false);
   const [error, setError] = useState(null);
+  const [realtimeStatus, setRealtimeStatus] = useState('IDLE');
+  const [pollingHealthy, setPollingHealthy] = useState(true);
 
-  // Refs
   const channelRef = useRef(null);
+  const pollTimerRef = useRef(null);
   const highlightTimerRef = useRef({});
+  const eventIdSetRef = useRef(new Set());
+  const lastTimestampRef = useRef(new Date().toISOString());
+  const lastTimestampIndiaRef = useRef(getIndiaNowIso());
 
-  // Effective domain: URL tracker overrides site filter
-  const activeDomain = trackedDomain || siteFilter;
+  const allSiteIds = useMemo(
+    () => sites.map((site) => site.id),
+    [sites]
+  );
 
-  // ─── Load initial data ─────────────────────────────────────
+  const activeSiteIds = useMemo(() => {
+    if (trackedSite?.id != null) return [trackedSite.id];
+    if (siteFilter != null && siteFilter !== '') {
+      const matched = sites.find((site) => String(site.id) === String(siteFilter));
+      return matched ? [matched.id] : [siteFilter];
+    }
+    return allSiteIds;
+  }, [trackedSite, siteFilter, allSiteIds, sites]);
+
+  const isWithinRange = useCallback(
+    (timestamp) => {
+      if (!timeRange || !timestamp) return true;
+      const cutoff = Date.now() - timeRange * 60 * 1000;
+      return new Date(timestamp).getTime() >= cutoff;
+    },
+    [timeRange]
+  );
+
+  const eventMatchesCurrentFilters = useCallback(
+    (event) => {
+      if (!event) return false;
+      if (eventTypeFilter !== 'all' && event.event_type !== eventTypeFilter) return false;
+      if (!isWithinRange(event.event_timestamp)) return false;
+      return true;
+    },
+    [eventTypeFilter, isWithinRange]
+  );
+
+  const mergeIncomingEvents = useCallback((incoming) => {
+    if (!incoming?.length) return;
+
+    const filtered = incoming.filter(eventMatchesCurrentFilters);
+    if (!filtered.length) return;
+
+    const newIds = [];
+    filtered.forEach((row) => {
+      const id = row.event_id || row.id;
+      if (id != null && !eventIdSetRef.current.has(id)) {
+        newIds.push(id);
+      }
+    });
+
+    setEvents((prev) => {
+      const merged = [...filtered, ...prev];
+      const deduped = [];
+      const seen = new Set();
+
+      merged.forEach((row) => {
+        const key = row.event_id || row.id || `${row.session_id}-${row.event_timestamp}-${row.event_type}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        deduped.push(row);
+      });
+
+      deduped.sort((a, b) => new Date(b.event_timestamp) - new Date(a.event_timestamp));
+      const trimmed = deduped.slice(0, LIVE_LIMIT);
+
+      eventIdSetRef.current = new Set(trimmed.map((row) => row.event_id || row.id).filter(Boolean));
+      const newest = trimmed[0]?.event_timestamp;
+      if (newest) {
+        lastTimestampRef.current = newest;
+        lastTimestampIndiaRef.current = new Date(newest).toLocaleString('en-GB', { timeZone: 'Asia/Kolkata' });
+      }
+      return trimmed;
+    });
+
+    if (newIds.length) {
+      setHighlightIds((prev) => {
+        const next = new Set(prev);
+        newIds.forEach((id) => next.add(id));
+        return next;
+      });
+
+      newIds.forEach((id) => {
+        if (highlightTimerRef.current[id]) {
+          clearTimeout(highlightTimerRef.current[id]);
+        }
+        highlightTimerRef.current[id] = setTimeout(() => {
+          setHighlightIds((prev) => {
+            const next = new Set(prev);
+            next.delete(id);
+            return next;
+          });
+          delete highlightTimerRef.current[id];
+        }, 2200);
+      });
+    }
+  }, [eventMatchesCurrentFilters]);
+
+  const refreshSites = useCallback(async () => {
+    const data = await fetchUserSites();
+    setSites(data);
+  }, []);
+
   const loadEvents = useCallback(async () => {
+    if (!activeSiteIds.length) {
+      setEvents([]);
+      eventIdSetRef.current = new Set();
+      lastTimestampRef.current = new Date().toISOString();
+      lastTimestampIndiaRef.current = getIndiaNowIso();
+      setLoading(false);
+      return;
+    }
+
     try {
       const data = await fetchLiveEvents({
-        limit: 100,
-        domain: activeDomain,
+        limit: LIVE_LIMIT,
+        siteIds: activeSiteIds,
         eventType: eventTypeFilter,
         minutes: timeRange,
       });
+
       setEvents(data);
+      eventIdSetRef.current = new Set(data.map((row) => row.event_id || row.id).filter(Boolean));
+      const newest = data[0]?.event_timestamp;
+      lastTimestampRef.current = newest || new Date().toISOString();
+      lastTimestampIndiaRef.current = newest
+        ? new Date(newest).toLocaleString('en-GB', { timeZone: 'Asia/Kolkata' })
+        : getIndiaNowIso();
       setError(null);
     } catch (err) {
       console.error('Failed to load events:', err);
-      setError(err.message);
+      setError(err.message || 'Failed to load events.');
     } finally {
       setLoading(false);
     }
-  }, [activeDomain, eventTypeFilter, timeRange]);
+  }, [activeSiteIds, eventTypeFilter, timeRange]);
 
-  // Load sites list
-  const refreshSites = () => {
-    fetchSitesList().then(setSites).catch(console.error);
-  };
   useEffect(() => {
     refreshSites();
-  }, []);
+  }, [refreshSites]);
 
-  // Load events when filters change
   useEffect(() => {
     setLoading(true);
-    loadEvents();
+    void loadEvents();
   }, [loadEvents]);
 
-  // Refresh event rate periodically
   useEffect(() => {
     const loadRate = async () => {
       try {
@@ -82,68 +213,119 @@ const LiveTracking = () => {
         // non-critical
       }
     };
-    loadRate();
+    void loadRate();
     const interval = setInterval(loadRate, 10_000);
     return () => clearInterval(interval);
   }, []);
 
-  // ─── Realtime subscription ────────────────────────────────
   useEffect(() => {
-    if (isPaused) return;
+    if (isPaused || !activeSiteIds.length) {
+      setRealtimeStatus(isPaused ? 'PAUSED' : 'NO_SITES');
+      return undefined;
+    }
 
-    const channel = subscribeLiveEvents((newEvent) => {
-      const eventId = newEvent.id || newEvent.event_id || Date.now();
-
-      // Prepend and trim to 100
-      setEvents((prev) => {
-        const enriched = {
-          event_id: eventId,
-          event_type: newEvent.event_type,
-          event_timestamp: newEvent.event_timestamp,
-          metadata: newEvent.metadata,
-          session_id: newEvent.session_id,
-          site_name: newEvent.site_name || '',
-          domain: newEvent.domain || '',
-          device_info: newEvent.device_info || null,
-        };
-        return [enriched, ...prev].slice(0, 100);
-      });
-
-      // Highlight new event
-      setHighlightIds((prev) => new Set([...prev, eventId]));
-      highlightTimerRef.current[eventId] = setTimeout(() => {
-        setHighlightIds((prev) => {
-          const next = new Set(prev);
-          next.delete(eventId);
-          return next;
-        });
-        delete highlightTimerRef.current[eventId];
-      }, 2000);
+    const channel = subscribeLiveEvents({
+      siteIds: activeSiteIds,
+      onStatusChange: setRealtimeStatus,
+      onNewEvent: (newEvent) => {
+        mergeIncomingEvents([newEvent]);
+      },
     });
 
     channelRef.current = channel;
-
     return () => {
       unsubscribeChannel(channel);
+    };
+  }, [isPaused, activeSiteIds, mergeIncomingEvents]);
+
+  useEffect(() => {
+    if (isPaused || !activeSiteIds.length) {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+      return undefined;
+    }
+
+    const poll = async () => {
+      try {
+        const newRows = await fetchNewEvents(activeSiteIds, lastTimestampRef.current, {
+          limit: 200,
+          eventType: eventTypeFilter,
+        });
+        if (newRows.length) {
+          mergeIncomingEvents(newRows);
+        }
+        setPollingHealthy(true);
+      } catch (err) {
+        console.error('Polling fallback error:', err);
+        setPollingHealthy(false);
+      }
+    };
+
+    void poll();
+    pollTimerRef.current = setInterval(poll, POLL_INTERVAL_MS);
+    return () => {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    };
+  }, [isPaused, activeSiteIds, eventTypeFilter, mergeIncomingEvents]);
+
+  useEffect(
+    () => () => {
+      unsubscribeChannel(channelRef.current);
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
       Object.values(highlightTimerRef.current).forEach(clearTimeout);
       highlightTimerRef.current = {};
-    };
-  }, [isPaused, activeDomain]);
+    },
+    []
+  );
 
-  // ─── Handlers ─────────────────────────────────────────────
-  const handleStartMonitoring = (domain) => {
-    setTrackedDomain(domain);
-    if (domain) {
+  const handleStartMonitoring = (site) => {
+    if (!site) {
+      setTrackedSite(null);
       setSiteFilter(null);
+      return;
     }
+    setTrackedSite(site);
+    setSiteFilter(String(site.id));
   };
 
-  const handleSiteFilterChange = (domain) => {
-    setSiteFilter(domain);
-    if (domain) {
-      setTrackedDomain(null);
-    }
+  const handleSiteFilterChange = (siteId) => {
+    setTrackedSite(null);
+    setSiteFilter(siteId);
   };
+
+  const statusBadge = (() => {
+    if (isPaused) {
+      return {
+        text: 'Paused',
+        className: 'text-yellow-400',
+        dotClass: 'bg-yellow-400',
+      };
+    }
+    if (!activeSiteIds.length) {
+      return {
+        text: 'No active sites',
+        className: 'text-muted-foreground',
+        dotClass: 'bg-muted-foreground',
+      };
+    }
+    if (realtimeStatus === 'SUBSCRIBED') {
+      return {
+        text: pollingHealthy ? 'Live realtime + polling backup' : 'Live realtime',
+        className: 'text-green-400',
+        dotClass: 'bg-green-400',
+      };
+    }
+    return {
+      text: pollingHealthy ? 'Polling fallback active (2s)' : 'Connection degraded',
+      className: pollingHealthy ? 'text-cyan-400' : 'text-red-400',
+      dotClass: pollingHealthy ? 'bg-cyan-400' : 'bg-red-400',
+    };
+  })();
 
   return (
     <motion.div
@@ -154,13 +336,11 @@ const LiveTracking = () => {
       className="min-h-screen py-8"
     >
       <div className="container mx-auto px-6">
-        {/* Header */}
         <div className="mb-6">
           <h1 className="text-4xl font-bold mb-2">Live Event Tracking</h1>
-          <p className="text-muted-foreground">Real-time event monitoring across tracked websites</p>
+          <p className="text-muted-foreground">Realtime event monitoring with auto-refresh fallback every 2 seconds.</p>
         </div>
 
-        {/* Unified Tracking Script Generator + Monitoring */}
         <div className="mb-4">
           <TrackingScriptGenerator
             onSiteRegistered={refreshSites}
@@ -168,7 +348,6 @@ const LiveTracking = () => {
           />
         </div>
 
-        {/* Controls Row: Filters + Counter */}
         <div className="grid lg:grid-cols-[1fr_auto] gap-4 mb-4">
           <SiteFilter
             sites={sites}
@@ -182,38 +361,37 @@ const LiveTracking = () => {
           <EventCounter rate={eventRate} eventCount={events.length} />
         </div>
 
-        {/* Stream Controls */}
-        <div className="flex items-center gap-3 mb-4">
+        <div className="flex flex-wrap items-center gap-3 mb-4">
           <button
-            onClick={() => setIsPaused(!isPaused)}
+            onClick={() => setIsPaused((prev) => !prev)}
             className={`px-4 py-2 rounded-lg text-sm font-medium transition-all active:scale-95 ${
               isPaused
                 ? 'bg-green-500/20 text-green-400 border border-green-500/50 hover:bg-green-500/30'
                 : 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/50 hover:bg-yellow-500/30'
             }`}
           >
-            {isPaused ? '▶️ Resume' : '⏸️ Pause'}
+            {isPaused ? 'Resume' : 'Pause'}
           </button>
+
           <button
-            onClick={() => { setLoading(true); loadEvents(); }}
+            onClick={() => {
+              setLoading(true);
+              void loadEvents();
+            }}
             className="px-4 py-2 glass rounded-lg text-sm text-muted-foreground hover:bg-white/10 transition-all active:scale-95"
           >
-            🔄 Refresh
+            Refresh
           </button>
 
-          {error && (
-            <span className="text-xs text-red-400 ml-auto">⚠️ {error}</span>
-          )}
+          {error && <span className="text-xs text-red-400">Error: {error}</span>}
 
-          {!isPaused && (
-            <span className="flex items-center gap-2 text-xs text-green-400 ml-auto">
-              <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
-              Live — Realtime connected
-            </span>
-          )}
+          <span className={`ml-auto flex items-center gap-2 text-xs ${statusBadge.className}`}>
+            <span className={`w-2 h-2 rounded-full animate-pulse ${statusBadge.dotClass}`} />
+            {statusBadge.text}
+            {activeSiteIds.length ? ` • Last seen (IST): ${lastTimestampIndiaRef.current}` : ''}
+          </span>
         </div>
 
-        {/* Event Feed */}
         {loading ? (
           <div className="flex items-center justify-center py-20">
             <div className="text-center">
@@ -232,7 +410,6 @@ const LiveTracking = () => {
         )}
       </div>
 
-      {/* Event Details Side Panel */}
       <EventDetailsModal
         event={selectedEvent}
         onClose={() => setSelectedEvent(null)}

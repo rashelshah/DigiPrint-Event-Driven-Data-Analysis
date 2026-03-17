@@ -59,8 +59,9 @@ const SiteFilter = ({
         >
           <option value="">All Sites</option>
           {sites.map((s) => (
-            <option key={s.id} value={s.domain}>
+            <option key={s.id} value={String(s.id)}>
               {s.site_name}
+              {s.domain ? ` (${s.domain})` : ''}
             </option>
           ))}
         </select>

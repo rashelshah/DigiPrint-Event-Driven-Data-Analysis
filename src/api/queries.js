@@ -1,14 +1,145 @@
 import { supabase } from './supabaseClient';
 
-// ─── Dashboard Queries ──────────────────────────────────────────
+const LIVE_EVENT_SELECT = `
+  id,
+  site_id,
+  session_id,
+  event_type,
+  event_timestamp,
+  metadata,
+  sessions (
+    device_info
+  ),
+  sites (
+    site_name,
+    domain
+  )
+`;
 
-/**
- * Fetch dashboard-level summary metrics.
- * Uses direct queries instead of RPC to avoid function overload conflicts.
- */
+const SUPPORTED_RANGE_KEYS = new Set(['1h', '24h', '7d', '30d']);
+
+function normalizeRelation(value) {
+  if (Array.isArray(value)) return value[0] || null;
+  return value || null;
+}
+
+function normalizeLiveEvent(row) {
+  const session = normalizeRelation(row.sessions);
+  const site = normalizeRelation(row.sites);
+
+  return {
+    id: row.id,
+    event_id: row.id,
+    site_id: row.site_id,
+    session_id: row.session_id,
+    event_type: row.event_type,
+    event_timestamp: row.event_timestamp,
+    metadata: row.metadata || {},
+    device_info: session?.device_info || null,
+    site_name: site?.site_name || '',
+    domain: site?.domain || '',
+  };
+}
+
+function getRangeStart(range) {
+  if (!range) return null;
+  if (typeof range === 'number' && Number.isFinite(range)) {
+    return new Date(Date.now() - range * 60 * 1000).toISOString();
+  }
+  if (typeof range === 'object' && range.from) {
+    return new Date(range.from).toISOString();
+  }
+  if (typeof range !== 'string' || !SUPPORTED_RANGE_KEYS.has(range)) {
+    return null;
+  }
+
+  const now = Date.now();
+  const map = {
+    '1h': 60 * 60 * 1000,
+    '24h': 24 * 60 * 60 * 1000,
+    '7d': 7 * 24 * 60 * 60 * 1000,
+    '30d': 30 * 24 * 60 * 60 * 1000,
+  };
+  return new Date(now - map[range]).toISOString();
+}
+
+function applyTimeFilter(query, column, options = {}) {
+  const since = options.since || getRangeStart(options.range) || null;
+  if (since) {
+    return query.gt(column, since);
+  }
+  return query;
+}
+
+function applySiteFilter(query, siteIds) {
+  if (Array.isArray(siteIds) && siteIds.length > 0) {
+    return query.in('site_id', siteIds);
+  }
+  return query;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function toHumanRangeLabel(range) {
+  if (range === '1h') return 'Last 1h';
+  if (range === '7d') return 'Last 7d';
+  if (range === '30d') return 'Last 30d';
+  return 'Last 24h';
+}
+
+function getTimeBucket(dateString, range) {
+  const date = new Date(dateString);
+  if (Number.isNaN(date.getTime())) return null;
+
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  const h = String(date.getHours()).padStart(2, '0');
+  const minute = date.getMinutes();
+
+  if (range === '1h') {
+    const bucketMin = String(Math.floor(minute / 5) * 5).padStart(2, '0');
+    return {
+      key: `${y}-${m}-${d} ${h}:${bucketMin}`,
+      label: `${h}:${bucketMin}`,
+    };
+  }
+  if (range === '24h') {
+    return {
+      key: `${y}-${m}-${d} ${h}:00`,
+      label: `${h}:00`,
+    };
+  }
+  return {
+    key: `${y}-${m}-${d}`,
+    label: `${m}/${d}`,
+  };
+}
+
+function buildCsv(rows) {
+  if (!rows?.length) return '';
+  const headers = Object.keys(rows[0]);
+  const escapedHeader = headers.join(',');
+  const escapedRows = rows.map((row) =>
+    headers
+      .map((key) => {
+        const raw = row[key] ?? '';
+        const value = String(raw).replace(/"/g, '""');
+        return `"${value}"`;
+      })
+      .join(',')
+  );
+  return [escapedHeader, ...escapedRows].join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard Queries
+// ---------------------------------------------------------------------------
+
 export async function fetchDashboardSummary() {
   try {
-    // Run all counts in parallel
     const [sitesRes, sessionsRes, eventsRes, activeRes] = await Promise.all([
       supabase.from('sites').select('id', { count: 'exact', head: true }).eq('is_active', true),
       supabase.from('sessions').select('id', { count: 'exact', head: true }),
@@ -16,33 +147,32 @@ export async function fetchDashboardSummary() {
       supabase.from('sessions').select('id', { count: 'exact', head: true }).is('end_time', null),
     ]);
 
-    // Get most active hour
-    let most_active_hour = null;
+    let mostActiveHour = null;
     try {
       const { data: hourData } = await supabase
         .from('events')
         .select('event_timestamp')
         .order('event_timestamp', { ascending: false })
-        .limit(1000);
+        .limit(2000);
+
       if (hourData?.length) {
         const hourCounts = {};
-        hourData.forEach(row => {
-          const h = new Date(row.event_timestamp).getHours();
-          hourCounts[h] = (hourCounts[h] || 0) + 1;
+        hourData.forEach((row) => {
+          const hour = new Date(row.event_timestamp).getHours();
+          hourCounts[hour] = (hourCounts[hour] || 0) + 1;
         });
-        most_active_hour = Object.entries(hourCounts)
-          .sort((a, b) => b[1] - a[1])[0]?.[0];
-        most_active_hour = most_active_hour != null ? parseInt(most_active_hour) : null;
+        const topHour = Object.entries(hourCounts).sort((a, b) => b[1] - a[1])[0]?.[0];
+        mostActiveHour = topHour != null ? Number(topHour) : null;
       }
-    } catch { /* non-critical */ }
+    } catch {
+      // Non-critical fallback.
+    }
 
-    // Get avg events per session
-    let avg_events_per_session = 0;
     const totalEvents = eventsRes.count || 0;
     const totalSessions = sessionsRes.count || 0;
-    if (totalSessions > 0) {
-      avg_events_per_session = Math.round((totalEvents / totalSessions) * 100) / 100;
-    }
+    const avgEventsPerSession = totalSessions > 0
+      ? Math.round((totalEvents / totalSessions) * 100) / 100
+      : 0;
 
     return {
       total_sites: sitesRes.count || 0,
@@ -50,8 +180,8 @@ export async function fetchDashboardSummary() {
       total_sessions: totalSessions,
       total_events: totalEvents,
       active_sessions: activeRes.count || 0,
-      most_active_hour,
-      avg_events_per_session,
+      most_active_hour: mostActiveHour,
+      avg_events_per_session: avgEventsPerSession,
     };
   } catch (err) {
     console.error('fetchDashboardSummary error:', err);
@@ -67,17 +197,13 @@ export async function fetchDashboardSummary() {
   }
 }
 
-/**
- * Fetch events-per-second.
- * Uses direct count instead of v_event_rate view to avoid missing view errors.
- */
 export async function fetchEventRate() {
   try {
     const tenSecondsAgo = new Date(Date.now() - 10_000).toISOString();
     const { count, error } = await supabase
       .from('events')
       .select('id', { count: 'exact', head: true })
-      .gte('event_timestamp', tenSecondsAgo);
+      .gt('event_timestamp', tenSecondsAgo);
 
     if (error) throw error;
     return { events_per_second: Math.round(((count || 0) / 10) * 100) / 100 };
@@ -86,57 +212,53 @@ export async function fetchEventRate() {
   }
 }
 
-/** Fetch per-site analytics */
 export async function fetchSiteAnalytics() {
   try {
-    // Try the view first
-    const { data, error } = await supabase
-      .from('v_site_analytics')
-      .select('*');
+    const { data, error } = await supabase.from('v_site_analytics').select('*');
     if (!error && data) return data;
-  } catch { /* fallback below */ }
+  } catch {
+    // Fallback below.
+  }
 
-  // Fallback: query sites directly
   try {
     const { data: sites } = await supabase
       .from('sites')
       .select('id, site_name, domain')
       .eq('is_active', true);
-
     if (!sites?.length) return [];
 
-    // For each site, count events
-    const results = [];
-    for (const site of sites) {
-      const { count } = await supabase
-        .from('events')
-        .select('id', { count: 'exact', head: true })
-        .eq('site_id', site.id);
-      results.push({
-        site_name: site.site_name,
-        domain: site.domain,
-        total_events: count || 0,
-        total_sessions: 0,
-      });
-    }
-    return results.sort((a, b) => b.total_events - a.total_events);
+    const rows = await Promise.all(
+      sites.map(async (site) => {
+        const [eventsRes, sessionsRes] = await Promise.all([
+          supabase.from('events').select('id', { count: 'exact', head: true }).eq('site_id', site.id),
+          supabase.from('sessions').select('id', { count: 'exact', head: true }).eq('site_id', site.id),
+        ]);
+        return {
+          site_name: site.site_name,
+          domain: site.domain,
+          total_events: eventsRes.count || 0,
+          total_sessions: sessionsRes.count || 0,
+        };
+      })
+    );
+    return rows.sort((a, b) => b.total_events - a.total_events);
   } catch {
     return [];
   }
 }
 
-/** Fetch top event types with counts */
 export async function fetchTopEventTypes() {
   try {
     const { data, error } = await supabase
       .from('events')
       .select('event_type')
-      .limit(5000);
+      .limit(6000);
     if (error) throw error;
 
     const counts = {};
-    (data ?? []).forEach((row) => {
-      counts[row.event_type] = (counts[row.event_type] || 0) + 1;
+    (data || []).forEach((row) => {
+      const type = row.event_type || 'unknown';
+      counts[type] = (counts[type] || 0) + 1;
     });
 
     return Object.entries(counts)
@@ -147,9 +269,10 @@ export async function fetchTopEventTypes() {
   }
 }
 
-// ─── Analytics Queries (direct Supabase) ────────────────────────
+// ---------------------------------------------------------------------------
+// Existing analytics pages (legacy compatibility)
+// ---------------------------------------------------------------------------
 
-/** Fetch event frequency by date */
 export async function fetchEventFrequency() {
   try {
     const { data, error } = await supabase
@@ -159,157 +282,664 @@ export async function fetchEventFrequency() {
       .limit(5000);
     if (error) throw error;
 
-    // Aggregate by date
     const dateCounts = {};
-    const sessionDates = {};
-    (data ?? []).forEach(row => {
+    (data || []).forEach((row) => {
       const date = new Date(row.event_timestamp).toLocaleDateString('en-US', {
-        month: 'short', day: 'numeric'
+        month: 'short',
+        day: 'numeric',
       });
       dateCounts[date] = (dateCounts[date] || 0) + 1;
     });
 
-    return Object.entries(dateCounts)
-      .map(([date, events]) => ({ date, events, sessions: Math.floor(events / 5) || 1 }));
+    return Object.entries(dateCounts).map(([date, events]) => ({
+      date,
+      events,
+      sessions: Math.max(1, Math.floor(events / 5)),
+    }));
   } catch {
     return [];
   }
 }
 
-/** Fetch peak activity hours */
 export async function fetchPeakActivity() {
   try {
     const { data, error } = await supabase
       .from('events')
       .select('event_timestamp')
-      .limit(5000);
+      .limit(6000);
     if (error) throw error;
 
     const hourCounts = {};
-    (data ?? []).forEach(row => {
+    (data || []).forEach((row) => {
       const hour = new Date(row.event_timestamp).getHours();
       hourCounts[hour] = (hourCounts[hour] || 0) + 1;
     });
 
     return Object.entries(hourCounts)
-      .map(([hour, event_count]) => ({ hour: parseInt(hour), event_count }))
+      .map(([hour, event_count]) => ({ hour: Number(hour), event_count }))
       .sort((a, b) => a.hour - b.hour);
   } catch {
     return [];
   }
 }
 
-/** Fetch site-level user behavior stats */
 export async function fetchSiteBehavior() {
   try {
     const { data: sites } = await supabase
       .from('sites')
       .select('id, site_name, domain')
       .eq('is_active', true);
-
     if (!sites?.length) return [];
 
-    const results = [];
-    for (const site of sites.slice(0, 10)) {
-      const [eventsRes, sessionsRes] = await Promise.all([
-        supabase.from('events').select('id', { count: 'exact', head: true }).eq('site_id', site.id),
-        supabase.from('sessions').select('id', { count: 'exact', head: true }).eq('site_id', site.id),
-      ]);
-      const totalEvents = eventsRes.count || 0;
-      const totalSessions = sessionsRes.count || 0;
-      results.push({
-        username: site.site_name || site.domain,
-        total_events: totalEvents,
-        total_sessions: totalSessions || 1,
-      });
-    }
-    return results.sort((a, b) => b.total_events - a.total_events);
+    const rows = await Promise.all(
+      sites.slice(0, 10).map(async (site) => {
+        const [eventsRes, sessionsRes] = await Promise.all([
+          supabase.from('events').select('id', { count: 'exact', head: true }).eq('site_id', site.id),
+          supabase.from('sessions').select('id', { count: 'exact', head: true }).eq('site_id', site.id),
+        ]);
+        return {
+          username: site.site_name || site.domain,
+          total_events: eventsRes.count || 0,
+          total_sessions: sessionsRes.count || 1,
+        };
+      })
+    );
+    return rows.sort((a, b) => b.total_events - a.total_events);
   } catch {
     return [];
   }
 }
 
-// ─── Live Events Queries ────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Live events + realtime + polling
+// ---------------------------------------------------------------------------
 
-/**
- * Fetch live events from v_live_events view.
- */
+export async function fetchUserSites() {
+  try {
+    const { data, error } = await supabase
+      .from('sites')
+      .select('id, site_name, domain, is_active, created_at')
+      .eq('is_active', true)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    return data || [];
+  } catch (err) {
+    console.error('fetchUserSites error:', err);
+    return [];
+  }
+}
+
+export async function fetchSitesList() {
+  return fetchUserSites();
+}
+
 export async function fetchLiveEvents({
   limit = 50,
+  siteId = null,
+  siteIds = null,
   domain = null,
   eventType = null,
   minutes = null,
+  since = null,
+  search = null,
 } = {}) {
   try {
-    let query = supabase
-      .from('v_live_events')
-      .select('*')
-      .order('event_timestamp', { ascending: false })
-      .limit(limit);
+    const effectiveSiteIds = siteIds?.length
+      ? siteIds
+      : siteId != null
+        ? [siteId]
+        : null;
 
-    if (domain) {
-      query = query.eq('domain', domain);
-    }
+    let query = supabase
+      .from('events')
+      .select(LIVE_EVENT_SELECT)
+      .order('event_timestamp', { ascending: false })
+      .limit(clamp(limit, 1, 500));
+
+    query = applySiteFilter(query, effectiveSiteIds);
+
     if (eventType && eventType !== 'all') {
       query = query.eq('event_type', eventType);
     }
-    if (minutes) {
-      const since = new Date(Date.now() - minutes * 60 * 1000).toISOString();
-      query = query.gte('event_timestamp', since);
+
+    const sinceFromMinutes = typeof minutes === 'number' && minutes > 0
+      ? new Date(Date.now() - minutes * 60 * 1000).toISOString()
+      : null;
+    const effectiveSince = since || sinceFromMinutes;
+    if (effectiveSince) {
+      query = query.gt('event_timestamp', effectiveSince);
     }
 
     const { data, error } = await query;
     if (error) throw error;
-    return data ?? [];
+
+    let rows = (data || []).map(normalizeLiveEvent);
+    if (domain) {
+      rows = rows.filter((row) => row.domain === domain);
+    }
+    if (search?.trim()) {
+      const needle = search.trim().toLowerCase();
+      rows = rows.filter((row) => {
+        const payload = JSON.stringify(row.metadata || {}).toLowerCase();
+        return (
+          String(row.event_type || '').toLowerCase().includes(needle) ||
+          String(row.site_name || '').toLowerCase().includes(needle) ||
+          String(row.domain || '').toLowerCase().includes(needle) ||
+          payload.includes(needle)
+        );
+      });
+    }
+
+    return rows.slice(0, limit);
   } catch (err) {
     console.error('fetchLiveEvents error:', err);
     return [];
   }
 }
 
-/** Fetch list of active sites for filter dropdown */
-export async function fetchSitesList() {
+export async function fetchNewEvents(siteIds, since, options = {}) {
+  if (!Array.isArray(siteIds) || siteIds.length === 0) return [];
+
   try {
-    const { data, error } = await supabase
-      .from('sites')
-      .select('id, site_name, domain')
-      .eq('is_active', true)
-      .order('site_name');
+    const limit = clamp(options.limit || 150, 1, 500);
+    let query = supabase
+      .from('events')
+      .select(LIVE_EVENT_SELECT)
+      .in('site_id', siteIds)
+      .order('event_timestamp', { ascending: true })
+      .limit(limit);
+
+    if (since) {
+      query = query.gt('event_timestamp', since);
+    }
+    if (options.eventType && options.eventType !== 'all') {
+      query = query.eq('event_type', options.eventType);
+    }
+
+    const { data, error } = await query;
     if (error) throw error;
-    return data ?? [];
-  } catch {
+    return (data || []).map(normalizeLiveEvent);
+  } catch (err) {
+    console.error('fetchNewEvents error:', err);
     return [];
   }
 }
 
-// ─── Realtime Subscription ──────────────────────────────────────
+export function subscribeLiveEvents({
+  siteIds,
+  onNewEvent,
+  onStatusChange,
+}) {
+  if (!Array.isArray(siteIds) || siteIds.length === 0) {
+    onStatusChange?.('NO_SITES');
+    return null;
+  }
 
-/**
- * Subscribe to live INSERT events on the events table.
- * Returns subscription channel for cleanup.
- */
-export function subscribeLiveEvents(onNewEvent) {
+  const filterValue = `site_id=in.(${siteIds.join(',')})`;
+  const channelName = `events-stream-${siteIds.join('-')}-${Date.now()}`;
+
   const channel = supabase
-    .channel('events-stream')
+    .channel(channelName)
     .on(
       'postgres_changes',
       {
         event: 'INSERT',
         schema: 'public',
         table: 'events',
+        filter: filterValue,
       },
-      (payload) => {
-        onNewEvent(payload.new);
+      async (payload) => {
+        const inserted = payload?.new;
+        if (!inserted) return;
+
+        try {
+          const { data, error } = await supabase
+            .from('events')
+            .select(LIVE_EVENT_SELECT)
+            .eq('id', inserted.id)
+            .single();
+
+          if (error) throw error;
+          onNewEvent?.(normalizeLiveEvent(data));
+        } catch {
+          onNewEvent?.({
+            id: inserted.id,
+            event_id: inserted.id,
+            site_id: inserted.site_id,
+            session_id: inserted.session_id,
+            event_type: inserted.event_type,
+            event_timestamp: inserted.event_timestamp,
+            metadata: inserted.metadata || {},
+            device_info: null,
+            site_name: '',
+            domain: '',
+          });
+        }
       }
     )
-    .subscribe();
+    .subscribe((status) => {
+      onStatusChange?.(status);
+    });
 
   return channel;
 }
 
-/** Unsubscribe from a channel */
 export function unsubscribeChannel(channel) {
   if (channel) {
     supabase.removeChannel(channel);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Production analytics (aggregated helper set)
+// ---------------------------------------------------------------------------
+
+export async function fetchOverviewMetrics(siteIds, range = '24h') {
+  if (!Array.isArray(siteIds) || siteIds.length === 0) {
+    return {
+      total_events: 0,
+      sessions: 0,
+      active_users: 0,
+      avg_session_duration: 0,
+      range_label: toHumanRangeLabel(range),
+    };
+  }
+
+  try {
+    let eventsCountQuery = supabase
+      .from('events')
+      .select('id', { count: 'exact', head: true });
+    eventsCountQuery = applySiteFilter(eventsCountQuery, siteIds);
+    eventsCountQuery = applyTimeFilter(eventsCountQuery, 'event_timestamp', { range });
+
+    let sessionsCountQuery = supabase
+      .from('sessions')
+      .select('id', { count: 'exact', head: true });
+    sessionsCountQuery = sessionsCountQuery.in('site_id', siteIds);
+    sessionsCountQuery = applyTimeFilter(sessionsCountQuery, 'start_time', { range });
+
+    let sessionsDurationQuery = supabase
+      .from('sessions')
+      .select('duration_seconds, start_time, end_time')
+      .in('site_id', siteIds)
+      .limit(4000);
+    sessionsDurationQuery = applyTimeFilter(sessionsDurationQuery, 'start_time', { range });
+
+    let activeUsersQuery = supabase
+      .from('events')
+      .select('session_id')
+      .in('site_id', siteIds)
+      .limit(8000);
+    activeUsersQuery = applyTimeFilter(activeUsersQuery, 'event_timestamp', { range });
+
+    const [eventsCountRes, sessionsCountRes, durationRes, activeUsersRes] = await Promise.all([
+      eventsCountQuery,
+      sessionsCountQuery,
+      sessionsDurationQuery,
+      activeUsersQuery,
+    ]);
+
+    const durations = (durationRes.data || [])
+      .map((row) => {
+        if (typeof row.duration_seconds === 'number') return row.duration_seconds;
+        if (row.start_time && row.end_time) {
+          const ms = new Date(row.end_time).getTime() - new Date(row.start_time).getTime();
+          return ms > 0 ? Math.round(ms / 1000) : 0;
+        }
+        return 0;
+      })
+      .filter((value) => Number.isFinite(value) && value >= 0);
+
+    const avgSessionDuration = durations.length
+      ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length)
+      : 0;
+
+    const activeUsers = new Set((activeUsersRes.data || []).map((row) => row.session_id).filter(Boolean)).size;
+
+    return {
+      total_events: eventsCountRes.count || 0,
+      sessions: sessionsCountRes.count || 0,
+      active_users: activeUsers,
+      avg_session_duration: avgSessionDuration,
+      range_label: toHumanRangeLabel(range),
+    };
+  } catch (err) {
+    console.error('fetchOverviewMetrics error:', err);
+    return {
+      total_events: 0,
+      sessions: 0,
+      active_users: 0,
+      avg_session_duration: 0,
+      range_label: toHumanRangeLabel(range),
+    };
+  }
+}
+
+export async function fetchEventDistribution(siteIds, range = '24h') {
+  if (!Array.isArray(siteIds) || siteIds.length === 0) return [];
+
+  try {
+    let query = supabase
+      .from('events')
+      .select('event_type, event_timestamp')
+      .in('site_id', siteIds)
+      .limit(10000);
+    query = applyTimeFilter(query, 'event_timestamp', { range });
+    const { data, error } = await query;
+    if (error) throw error;
+
+    const counts = {};
+    (data || []).forEach((row) => {
+      const type = row.event_type || 'unknown';
+      counts[type] = (counts[type] || 0) + 1;
+    });
+
+    return Object.entries(counts)
+      .map(([event_type, count]) => ({ event_type, count }))
+      .sort((a, b) => b.count - a.count);
+  } catch (err) {
+    console.error('fetchEventDistribution error:', err);
+    return [];
+  }
+}
+
+export async function fetchEventsOverTime(siteIds, range = '24h') {
+  if (!Array.isArray(siteIds) || siteIds.length === 0) return [];
+
+  try {
+    let query = supabase
+      .from('v_events_over_time')
+      .select('*');
+    query = applySiteFilter(query, siteIds);
+    query = applyTimeFilter(query, 'time_bucket', { range });
+    const { data, error } = await query.order('time_bucket', { ascending: true });
+    if (!error && data?.length) {
+      return data.map((row) => ({
+        timestamp: row.time_bucket,
+        label: new Date(row.time_bucket).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        count: Number(row.event_count || row.total || 0),
+      }));
+    }
+  } catch {
+    // Fallback below.
+  }
+
+  try {
+    let query = supabase
+      .from('events')
+      .select('event_timestamp')
+      .in('site_id', siteIds)
+      .limit(12000);
+    query = applyTimeFilter(query, 'event_timestamp', { range });
+    const { data, error } = await query.order('event_timestamp', { ascending: true });
+    if (error) throw error;
+
+    const buckets = new Map();
+    (data || []).forEach((row) => {
+      const bucket = getTimeBucket(row.event_timestamp, range);
+      if (!bucket) return;
+      const current = buckets.get(bucket.key) || { label: bucket.label, count: 0 };
+      current.count += 1;
+      buckets.set(bucket.key, current);
+    });
+
+    return Array.from(buckets.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([timestamp, value]) => ({
+        timestamp,
+        label: value.label,
+        count: value.count,
+      }));
+  } catch (err) {
+    console.error('fetchEventsOverTime error:', err);
+    return [];
+  }
+}
+
+export async function fetchTopPages(siteIds, range = '24h') {
+  if (!Array.isArray(siteIds) || siteIds.length === 0) return [];
+
+  try {
+    let query = supabase
+      .from('events')
+      .select('event_type, event_timestamp, metadata')
+      .in('site_id', siteIds)
+      .eq('event_type', 'page_view')
+      .limit(12000);
+    query = applyTimeFilter(query, 'event_timestamp', { range });
+    const { data, error } = await query;
+    if (error) throw error;
+
+    const counts = {};
+    (data || []).forEach((row) => {
+      const page = row.metadata?.page || '/';
+      counts[page] = (counts[page] || 0) + 1;
+    });
+
+    return Object.entries(counts)
+      .map(([page, visits]) => ({ page, visits }))
+      .sort((a, b) => b.visits - a.visits)
+      .slice(0, 10);
+  } catch (err) {
+    console.error('fetchTopPages error:', err);
+    return [];
+  }
+}
+
+export async function fetchScrollDepth(siteIds, range = '24h') {
+  const defaultSeries = [25, 50, 75, 100].map((milestone) => ({
+    milestone,
+    users: 0,
+    percentage: 0,
+  }));
+  if (!Array.isArray(siteIds) || siteIds.length === 0) return defaultSeries;
+
+  try {
+    let query = supabase
+      .from('events')
+      .select('session_id, event_type, event_timestamp, metadata')
+      .in('site_id', siteIds)
+      .limit(15000);
+    query = applyTimeFilter(query, 'event_timestamp', { range });
+    const { data, error } = await query;
+    if (error) throw error;
+
+    const allSessions = new Set();
+    const maxDepthBySession = new Map();
+
+    (data || []).forEach((row) => {
+      if (!row.session_id) return;
+      allSessions.add(row.session_id);
+      if (row.event_type !== 'scroll_depth') return;
+
+      const depth = Number(row.metadata?.scroll_percent || row.metadata?.depth || 0);
+      const safeDepth = clamp(depth, 0, 100);
+      const current = maxDepthBySession.get(row.session_id) || 0;
+      if (safeDepth > current) {
+        maxDepthBySession.set(row.session_id, safeDepth);
+      }
+    });
+
+    const totalUsers = allSessions.size || 1;
+    return [25, 50, 75, 100].map((milestone) => {
+      let users = 0;
+      maxDepthBySession.forEach((value) => {
+        if (value >= milestone) users += 1;
+      });
+      return {
+        milestone,
+        users,
+        percentage: Math.round((users / totalUsers) * 100),
+      };
+    });
+  } catch (err) {
+    console.error('fetchScrollDepth error:', err);
+    return defaultSeries;
+  }
+}
+
+export async function fetchDeviceAnalytics(siteIds, range = '24h') {
+  if (!Array.isArray(siteIds) || siteIds.length === 0) {
+    return { browsers: [], screens: [] };
+  }
+
+  try {
+    let query = supabase
+      .from('events')
+      .select('session_id, event_timestamp, metadata, sessions ( device_info )')
+      .in('site_id', siteIds)
+      .limit(15000);
+    query = applyTimeFilter(query, 'event_timestamp', { range });
+    const { data, error } = await query;
+    if (error) throw error;
+
+    const bySession = new Map();
+    (data || []).forEach((row) => {
+      if (!row.session_id || bySession.has(row.session_id)) return;
+      const session = normalizeRelation(row.sessions);
+      const meta = row.metadata || {};
+      const deviceInfo = session?.device_info || {};
+      bySession.set(row.session_id, {
+        browser: meta.browser || deviceInfo.browser || 'Unknown',
+        screen: meta.screen || deviceInfo.screen || 'Unknown',
+      });
+    });
+
+    const browserCounts = {};
+    const screenCounts = {};
+    bySession.forEach((entry) => {
+      browserCounts[entry.browser] = (browserCounts[entry.browser] || 0) + 1;
+      screenCounts[entry.screen] = (screenCounts[entry.screen] || 0) + 1;
+    });
+
+    return {
+      browsers: Object.entries(browserCounts)
+        .map(([browser, count]) => ({ browser, count }))
+        .sort((a, b) => b.count - a.count),
+      screens: Object.entries(screenCounts)
+        .map(([screen, count]) => ({ screen, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 10),
+    };
+  } catch (err) {
+    console.error('fetchDeviceAnalytics error:', err);
+    return { browsers: [], screens: [] };
+  }
+}
+
+export async function fetchFunnelData(siteIds, range = '24h') {
+  const empty = [
+    { step: 'page_view', count: 0, dropoff: 0 },
+    { step: 'click', count: 0, dropoff: 0 },
+    { step: 'form_submit', count: 0, dropoff: 0 },
+    { step: 'conversion', count: 0, dropoff: 0 },
+  ];
+  if (!Array.isArray(siteIds) || siteIds.length === 0) return empty;
+
+  try {
+    let query = supabase
+      .from('events')
+      .select('session_id, event_type, event_timestamp')
+      .in('site_id', siteIds)
+      .limit(20000);
+    query = applyTimeFilter(query, 'event_timestamp', { range });
+    const { data, error } = await query;
+    if (error) throw error;
+
+    const conversionTypes = new Set(['conversion', 'signup', 'purchase', 'checkout_complete']);
+    const stepsBySession = new Map();
+
+    (data || []).forEach((row) => {
+      if (!row.session_id) return;
+      const existing = stepsBySession.get(row.session_id) || {
+        page_view: false,
+        click: false,
+        form_submit: false,
+        conversion: false,
+      };
+      if (row.event_type === 'page_view') existing.page_view = true;
+      if (row.event_type === 'click') existing.click = true;
+      if (row.event_type === 'form_submit') {
+        existing.form_submit = true;
+        existing.conversion = true; // fallback conversion signal
+      }
+      if (conversionTypes.has(row.event_type)) existing.conversion = true;
+      stepsBySession.set(row.session_id, existing);
+    });
+
+    let pageView = 0;
+    let click = 0;
+    let formSubmit = 0;
+    let conversion = 0;
+
+    stepsBySession.forEach((steps) => {
+      if (steps.page_view) pageView += 1;
+      if (steps.page_view && steps.click) click += 1;
+      if (steps.page_view && steps.click && steps.form_submit) formSubmit += 1;
+      if (steps.page_view && steps.click && steps.form_submit && steps.conversion) conversion += 1;
+    });
+
+    const sequence = [
+      { step: 'page_view', count: pageView },
+      { step: 'click', count: click },
+      { step: 'form_submit', count: formSubmit },
+      { step: 'conversion', count: conversion },
+    ];
+
+    return sequence.map((row, idx) => {
+      if (idx === 0) return { ...row, dropoff: 0 };
+      const prev = sequence[idx - 1].count || 1;
+      const dropoff = Math.max(0, Math.round(((prev - row.count) / prev) * 100));
+      return { ...row, dropoff };
+    });
+  } catch (err) {
+    console.error('fetchFunnelData error:', err);
+    return empty;
+  }
+}
+
+export async function fetchRecentActivitySummary(siteIds, range = '24h', limit = 20, search = '') {
+  const events = await fetchLiveEvents({
+    siteIds,
+    eventType: 'all',
+    limit: Math.max(limit, 20),
+    since: getRangeStart(range),
+    search,
+  });
+
+  const grouped = {};
+  events.forEach((event) => {
+    const key = `${event.event_type}-${event.domain || event.site_name || 'unknown'}`;
+    if (!grouped[key]) {
+      grouped[key] = {
+        id: key,
+        event_type: event.event_type,
+        domain: event.domain,
+        site_name: event.site_name,
+        count: 0,
+        last_seen: event.event_timestamp,
+      };
+    }
+    grouped[key].count += 1;
+    if (new Date(event.event_timestamp) > new Date(grouped[key].last_seen)) {
+      grouped[key].last_seen = event.event_timestamp;
+    }
+  });
+
+  return Object.values(grouped)
+    .sort((a, b) => new Date(b.last_seen) - new Date(a.last_seen))
+    .slice(0, limit);
+}
+
+export function exportRowsAsCsv(rows, filename = 'digiprint-export.csv') {
+  const csv = buildCsv(rows);
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
 }

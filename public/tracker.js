@@ -1,431 +1,569 @@
-// DigiPrint Universal Tracker v3
-// Standalone script for external websites — loaded via <script> tag
-// Tracks: page_view, click, scroll_depth, form_submit, navigation,
-//         session_start, session_end, hover, download, external_link_click,
-//         search, login, logout, api_call, rage_click
+// DigiPrint Universal Tracker v4
+// Standalone script loaded via <script> tag.
+// Required attributes:
+//   - data-site-id
+//   - data-supabase-url
+//   - data-supabase-key
 
 (async function () {
-
-    const script = document.currentScript;
-    const domain = script.getAttribute("data-domain");
-    const SUPABASE_URL = script.getAttribute("data-supabase-url");
-    const SUPABASE_ANON_KEY = script.getAttribute("data-supabase-key");
-
-    if (!domain) {
-        console.warn("DigiPrint: data-domain attribute missing");
-        return;
-    }
-
-    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
-        console.warn("DigiPrint: Supabase credentials missing from script attributes");
-        return;
-    }
-
-    const { createClient } = await import(
-        "https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm"
+  const script =
+    document.currentScript ||
+    Array.from(document.getElementsByTagName("script")).find((node) =>
+      String(node.src || "").includes("tracker.js")
     );
 
-    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-        global: {
-            headers: {
-                apikey: SUPABASE_ANON_KEY,
-                Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-            },
-        },
+  const siteId = (script?.getAttribute("data-site-id") || "").trim();
+  const SUPABASE_URL = (script?.getAttribute("data-supabase-url") || "").trim();
+  const SUPABASE_ANON_KEY = (script?.getAttribute("data-supabase-key") || "").trim();
+
+  if (!siteId) {
+    console.warn("DigiPrint: data-site-id attribute is required. Tracking disabled.");
+    return;
+  }
+
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    console.warn("DigiPrint: Supabase credentials missing from script attributes.");
+    return;
+  }
+
+  const { createClient } = await import(
+    "https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm"
+  );
+
+  const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    global: {
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      },
+    },
+  });
+
+  const BATCH_INTERVAL_MS = 2000;
+  const MAX_BATCH_SIZE = 20;
+  const SESSION_RETRY_MAX = 3;
+  const SESSION_RETRY_DELAY_MS = 500;
+
+  let sessionId = null;
+  let flushTimer = null;
+  let ended = false;
+  let isFlushing = false;
+
+  const eventQueue = [];
+
+  function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function detectBrowser(ua) {
+    if (/edg/i.test(ua)) return "Edge";
+    if (/chrome|crios/i.test(ua) && !/edg/i.test(ua)) return "Chrome";
+    if (/safari/i.test(ua) && !/chrome|crios|edg/i.test(ua)) return "Safari";
+    if (/firefox|fxios/i.test(ua)) return "Firefox";
+    if (/opr|opera/i.test(ua)) return "Opera";
+    return "Unknown";
+  }
+
+  function detectOs(ua) {
+    if (/windows nt/i.test(ua)) return "Windows";
+    if (/android/i.test(ua)) return "Android";
+    if (/iphone|ipad|ipod/i.test(ua)) return "iOS";
+    if (/mac os x/i.test(ua)) return "macOS";
+    if (/linux/i.test(ua)) return "Linux";
+    return "Unknown";
+  }
+
+  function getBaseMetadata() {
+    const ua = navigator.userAgent || "";
+    return {
+      page: `${location.pathname}${location.search}`,
+      title: document.title || "",
+      timestamp: new Date().toISOString(),
+      referrer: document.referrer || null,
+      screen: `${window.screen?.width || window.innerWidth}x${window.screen?.height || window.innerHeight}`,
+      browser: detectBrowser(ua),
+      os: detectOs(ua),
+    };
+  }
+
+  function track(type, metadata) {
+    if (!sessionId) return;
+    const mergedMetadata = {
+      ...getBaseMetadata(),
+      ...(metadata || {}),
+    };
+
+    eventQueue.push({
+      site_id: siteId,
+      session_id: sessionId,
+      event_type: type,
+      metadata: mergedMetadata,
     });
 
-    let siteId = null;
-    let sessionId = null;
+    if (eventQueue.length >= MAX_BATCH_SIZE) {
+      void flushQueue();
+    }
+  }
 
-    // ─── Event Batching Queue ──────────────────────────────────
-    const eventQueue = [];
-    const BATCH_INTERVAL = 2000; // flush every 2 seconds
+  function isSupabaseUrl(url) {
+    if (!url) return false;
+    const normalized = String(url).toLowerCase();
+    return (
+      normalized.includes("supabase.co") ||
+      normalized.includes("/rest/v1") ||
+      normalized.includes("/realtime")
+    );
+  }
 
-    async function flushQueue() {
-        if (!eventQueue.length || !siteId || !sessionId) return;
+  async function insertBatch(batch) {
+    const { error } = await supabase.from("events").insert(batch);
+    if (error) throw error;
+  }
 
-        const batch = eventQueue.splice(0, eventQueue.length);
+  async function flushQueue(options) {
+    const useKeepalive = Boolean(options?.useKeepalive);
+    const flushAll = Boolean(options?.flushAll);
+
+    if (!eventQueue.length || !sessionId || isFlushing) return;
+    isFlushing = true;
+
+    try {
+      while (eventQueue.length) {
+        const sliceSize = flushAll ? Math.min(eventQueue.length, MAX_BATCH_SIZE) : MAX_BATCH_SIZE;
+        const batch = eventQueue.splice(0, sliceSize);
+
         try {
-            await supabase.from("events").insert(batch);
-        } catch (err) {
-            console.warn("DigiPrint: batch insert failed", err);
-            // Re-queue failed events (front of queue)
-            eventQueue.unshift(...batch);
-        }
-    }
-
-    // Flush periodically
-    setInterval(flushQueue, BATCH_INTERVAL);
-
-    // ─── Initialize ────────────────────────────────────────────
-
-    async function init() {
-        const { data: site } = await supabase
-            .from("sites")
-            .select("id")
-            .eq("domain", domain)
-            .single();
-
-        if (!site) {
-            console.warn("DigiPrint: site not registered —", domain);
-            return;
-        }
-
-        siteId = site.id;
-
-        sessionId = crypto.randomUUID();
-
-        const { error: sessionError } = await supabase
-            .from("sessions")
-            .insert({
-                id: sessionId,
-                site_id: siteId,
-                device_info: {
-                    browser: navigator.userAgent,
-                    os: navigator.platform,
-                    screen: `${window.innerWidth}x${window.innerHeight}`,
-                },
+          if (useKeepalive) {
+            const response = await fetch(`${SUPABASE_URL}/rest/v1/events`, {
+              method: "POST",
+              keepalive: true,
+              headers: {
+                apikey: SUPABASE_ANON_KEY,
+                Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+                "Content-Type": "application/json",
+                Prefer: "return=minimal",
+              },
+              body: JSON.stringify(batch),
             });
-
-        if (sessionError) {
-            console.warn("DigiPrint: failed to create session", sessionError);
-            return;
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}`);
+            }
+          } else {
+            await insertBatch(batch);
+          }
+        } catch (error) {
+          eventQueue.unshift(...batch);
+          console.warn("DigiPrint: event batch flush failed", error);
+          break;
         }
 
-        track("session_start", { page: location.pathname });
-        setupTracking();
+        if (!flushAll) break;
+      }
+    } finally {
+      isFlushing = false;
+    }
+  }
+
+  function flushWithBeacon() {
+    if (!eventQueue.length || !navigator.sendBeacon) {
+      return false;
     }
 
-    // ─── Core tracking function ────────────────────────────────
-    // Queues events for batched insert. Does NOT send event_timestamp
-    // — the database column uses DEFAULT now().
+    const batch = eventQueue.splice(0, eventQueue.length);
+    const payload = JSON.stringify(batch);
+    const blob = new Blob([payload], { type: "application/json" });
+    const url = `${SUPABASE_URL}/rest/v1/events?apikey=${encodeURIComponent(SUPABASE_ANON_KEY)}`;
+    const ok = navigator.sendBeacon(url, blob);
 
-    function track(type, metadata = {}) {
-        if (!siteId || !sessionId) return;
+    if (!ok) {
+      eventQueue.unshift(...batch);
+    }
+    return ok;
+  }
 
-        eventQueue.push({
-            site_id: siteId,
-            session_id: sessionId,
-            event_type: type,
-            metadata,
-        });
+  async function createSessionWithRetry() {
+    const ua = navigator.userAgent || "";
+    const deviceInfo = {
+      browser: detectBrowser(ua),
+      os: detectOs(ua),
+      screen: `${window.screen?.width || window.innerWidth}x${window.screen?.height || window.innerHeight}`,
+      user_agent: ua,
+    };
+
+    for (let attempt = 1; attempt <= SESSION_RETRY_MAX; attempt += 1) {
+      const candidateSessionId = crypto.randomUUID();
+      const { error } = await supabase.from("sessions").insert({
+        id: candidateSessionId,
+        site_id: siteId,
+        device_info: deviceInfo,
+        start_time: new Date().toISOString(),
+      });
+
+      if (!error) {
+        return candidateSessionId;
+      }
+
+      console.warn(
+        `DigiPrint: session creation failed (attempt ${attempt}/${SESSION_RETRY_MAX})`,
+        error
+      );
+      if (attempt < SESSION_RETRY_MAX) {
+        await delay(SESSION_RETRY_DELAY_MS * attempt);
+      }
     }
 
-    // ─── Event tracking setup ──────────────────────────────────
+    throw new Error("DigiPrint: unable to create session after retries.");
+  }
 
-    function setupTracking() {
-        // 1. Page View
-        track("page_view", { page: location.pathname, title: document.title });
+  function setupClickTracking() {
+    document.addEventListener(
+      "click",
+      (event) => {
+        const target = event.target instanceof Element ? event.target : null;
+        const el = target?.closest("a,button,input,textarea,select,[role='button']") || target;
+        if (!el) return;
 
-        // 2. Click tracking (with element details) + download + external link
-        setupClickTracking();
-
-        // 3. Form submission tracking (includes search, login, logout detection)
-        setupFormTracking();
-
-        // 4. Scroll milestone tracking
-        setupScrollTracking();
-
-        // 5. Navigation tracking (SPA support)
-        setupNavigationTracking();
-
-        // 6. Hover tracking on interactive elements
-        setupHoverTracking();
-
-        // 7. API call interception
-        setupApiCallTracking();
-
-        // 8. Rage click detection
-        setupRageClickTracking();
-
-        // 9. Session end on page unload — flush remaining events
-        window.addEventListener("beforeunload", () => {
-            track("session_end", { page: location.pathname });
-            // Synchronous flush attempt using sendBeacon
-            if (eventQueue.length && navigator.sendBeacon) {
-                const batch = eventQueue.splice(0, eventQueue.length);
-                const payload = JSON.stringify(batch);
-                // sendBeacon to Supabase REST API
-                const url = `${SUPABASE_URL}/rest/v1/events`;
-                const blob = new Blob([payload], { type: "application/json" });
-                navigator.sendBeacon(url + `?apikey=${SUPABASE_ANON_KEY}`, blob);
-            } else {
-                flushQueue();
-            }
-        });
-    }
-
-    // ─── Click Tracking ───────────────────────────────────────
-
-    function setupClickTracking() {
-        document.addEventListener("click", (e) => {
-            const el = e.target;
-            const meta = {
-                element: el.tagName,
-                page: location.pathname,
-            };
-            if (el.id) meta.element_id = el.id;
-            if (el.textContent) meta.text = el.textContent.trim().slice(0, 50);
-            if (el.className && typeof el.className === 'string') meta.element_class = el.className.slice(0, 80);
-
-            // Check for download links
-            if (el.tagName === 'A' || el.closest('a')) {
-                const anchor = el.tagName === 'A' ? el : el.closest('a');
-                const href = anchor?.href || '';
-
-                // Download detection
-                if (/\.(pdf|zip|rar|7z|doc|docx|xls|xlsx|ppt|pptx|csv|tar|gz|dmg|exe|msi|apk|ipa)$/i.test(href)) {
-                    track("download", { file: href.split('/').pop(), url: href, page: location.pathname });
-                }
-
-                // External link detection
-                try {
-                    const linkDomain = new URL(href).hostname;
-                    if (linkDomain && linkDomain !== location.hostname) {
-                        track("external_link_click", { url: href, domain: linkDomain, page: location.pathname });
-                    }
-                } catch {
-                    // Invalid URL, skip
-                }
-            }
-
-            track("click", meta);
-        });
-    }
-
-    // ─── Form Tracking (form_submit, search, login, logout) ───
-
-    function setupFormTracking() {
-        document.addEventListener("submit", (e) => {
-            const form = e.target;
-            const meta = {
-                page: location.pathname,
-            };
-            if (form.id) meta.formId = form.id;
-            if (form.action) meta.action = form.action;
-            if (form.method) meta.method = form.method;
-
-            // Detect form type
-            const formHtml = form.innerHTML.toLowerCase();
-            const formAction = (form.action || '').toLowerCase();
-            const formId = (form.id || '').toLowerCase();
-            const formClass = (form.className || '').toLowerCase();
-            const allText = `${formId} ${formClass} ${formAction} ${formHtml}`;
-
-            // Search form detection
-            const searchInput = form.querySelector('input[type="search"], input[name*="search"], input[name*="query"], input[name*="q"]');
-            if (searchInput) {
-                const query = searchInput.value?.trim();
-                if (query) {
-                    track("search", { query, page: location.pathname });
-                }
-            }
-
-            // Login form detection
-            if (/login|sign.?in|auth/i.test(allText)) {
-                track("login", { page: location.pathname });
-            }
-
-            // Logout detection
-            if (/logout|sign.?out/i.test(allText)) {
-                track("logout", { page: location.pathname });
-            }
-
-            track("form_submit", meta);
-        }, true);
-
-        // Also track search on Enter in search inputs outside forms
-        document.addEventListener("keydown", (e) => {
-            if (e.key !== "Enter") return;
-            const el = e.target;
-            if (el.tagName !== "INPUT") return;
-            const type = (el.type || '').toLowerCase();
-            const name = (el.name || '').toLowerCase();
-            if (type === "search" || /search|query/.test(name)) {
-                const query = el.value?.trim();
-                if (query) {
-                    track("search", { query, page: location.pathname });
-                }
-            }
-        });
-    }
-
-    // ─── Scroll Milestones (scroll_depth) ─────────────────────
-    // Each milestone fires only once per page (uses Set).
-
-    function setupScrollTracking() {
-        const milestones = [25, 50, 75, 100];
-        const reached = new Set();
-
-        const checkScroll = () => {
-            const scrollHeight = document.documentElement.scrollHeight - window.innerHeight;
-            if (scrollHeight <= 0) return;
-
-            const scrollPercent = Math.round((window.scrollY / scrollHeight) * 100);
-
-            for (const milestone of milestones) {
-                if (scrollPercent >= milestone && !reached.has(milestone)) {
-                    reached.add(milestone);
-                    track("scroll_depth", { scroll_percent: milestone, page: location.pathname });
-                }
-            }
+        const text = (el.textContent || "").trim().slice(0, 120);
+        const clickMetadata = {
+          element: el.tagName,
+          element_id: el.id || null,
+          element_class: typeof el.className === "string" ? el.className.slice(0, 120) : null,
+          text: text || null,
         };
+        track("click", clickMetadata);
 
-        let ticking = false;
-        window.addEventListener("scroll", () => {
-            if (!ticking) {
-                requestAnimationFrame(() => {
-                    checkScroll();
-                    ticking = false;
-                });
-                ticking = true;
-            }
-        }, { passive: true });
+        const attrText = [
+          el.id || "",
+          el.getAttribute?.("name") || "",
+          el.getAttribute?.("aria-label") || "",
+          el.getAttribute?.("data-testid") || "",
+          text,
+        ]
+          .join(" ")
+          .toLowerCase();
+
+        if (/logout|sign\s*out|log\s*out/.test(attrText)) {
+          track("logout", { trigger: "click", element: el.tagName });
+        }
+        if (/login|sign\s*in|log\s*in/.test(attrText)) {
+          track("login", { trigger: "click", element: el.tagName });
+        }
+
+        const anchor = el.closest("a");
+        if (!anchor?.href) return;
+
+        const href = anchor.href;
+        const fileName = href.split("/").pop() || null;
+        if (/\.(pdf|zip|rar|7z|doc|docx|xls|xlsx|ppt|pptx|csv|tar|gz|dmg|exe|msi|apk|ipa)$/i.test(href)) {
+          track("download", { file: fileName, url: href });
+        }
+
+        try {
+          const linkDomain = new URL(href).hostname;
+          if (linkDomain && linkDomain !== location.hostname) {
+            track("external_link_click", { url: href, domain: linkDomain });
+          }
+        } catch {
+          // Ignore invalid URLs.
+        }
+      },
+      true
+    );
+  }
+
+  function setupFormTracking() {
+    document.addEventListener(
+      "submit",
+      (event) => {
+        const form = event.target instanceof HTMLFormElement ? event.target : null;
+        if (!form) return;
+
+        const metadata = {
+          form_id: form.id || null,
+          action: form.action || null,
+          method: (form.method || "GET").toUpperCase(),
+        };
+        track("form_submit", metadata);
+
+        const formText = [
+          form.id || "",
+          form.className || "",
+          form.action || "",
+          form.getAttribute("name") || "",
+          form.textContent || "",
+        ]
+          .join(" ")
+          .toLowerCase();
+
+        const searchInput = form.querySelector(
+          "input[type='search'], input[name*='search' i], input[name*='query' i], input[name='q' i]"
+        );
+        const query = searchInput?.value?.trim();
+        if (query) {
+          track("search", { query });
+        }
+
+        if (/login|sign\s*in|auth/.test(formText)) {
+          track("login", { trigger: "form_submit" });
+        }
+        if (/logout|sign\s*out/.test(formText)) {
+          track("logout", { trigger: "form_submit" });
+        }
+      },
+      true
+    );
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      const input = event.target instanceof HTMLInputElement ? event.target : null;
+      if (!input) return;
+      const type = String(input.type || "").toLowerCase();
+      const name = String(input.name || "").toLowerCase();
+      if (type !== "search" && !/search|query|q/.test(name)) return;
+      const query = input.value?.trim();
+      if (query) {
+        track("search", { query, trigger: "enter_key" });
+      }
+    });
+  }
+
+  function setupScrollTracking() {
+    const milestones = [25, 50, 75, 100];
+    let reachedMilestones = new Set();
+    let ticking = false;
+    let lastPath = `${location.pathname}${location.search}`;
+
+    function checkScroll() {
+      const pageHeight = document.documentElement.scrollHeight - window.innerHeight;
+      if (pageHeight <= 0) return;
+
+      const percent = Math.min(100, Math.round((window.scrollY / pageHeight) * 100));
+      for (const milestone of milestones) {
+        if (percent >= milestone && !reachedMilestones.has(milestone)) {
+          reachedMilestones.add(milestone);
+          track("scroll_depth", { scroll_percent: milestone });
+        }
+      }
     }
 
-    // ─── Navigation tracking (History API) ─────────────────────
-
-    function setupNavigationTracking() {
-        let lastPath = location.pathname;
-
-        const onNavigate = () => {
-            const newPath = location.pathname;
-            if (newPath !== lastPath) {
-                track("navigation", { from: lastPath, to: newPath });
-                track("page_view", { page: newPath, title: document.title });
-                lastPath = newPath;
-            }
-        };
-
-        // Monkey-patch pushState and replaceState
-        const origPushState = history.pushState;
-        history.pushState = function () {
-            origPushState.apply(this, arguments);
-            onNavigate();
-        };
-
-        const origReplaceState = history.replaceState;
-        history.replaceState = function () {
-            origReplaceState.apply(this, arguments);
-            onNavigate();
-        };
-
-        window.addEventListener("popstate", onNavigate);
+    function resetMilestonesOnPathChange() {
+      const currentPath = `${location.pathname}${location.search}`;
+      if (currentPath !== lastPath) {
+        reachedMilestones = new Set();
+        lastPath = currentPath;
+      }
     }
 
-    // ─── Hover tracking (>1 second on interactive elements) ────
+    window.addEventListener(
+      "scroll",
+      () => {
+        if (ticking) return;
+        ticking = true;
+        requestAnimationFrame(() => {
+          resetMilestonesOnPathChange();
+          checkScroll();
+          ticking = false;
+        });
+      },
+      { passive: true }
+    );
+  }
 
-    function setupHoverTracking() {
-        let hoverTimer = null;
-        let hoveredEl = null;
+  function setupNavigationTracking() {
+    let lastPath = `${location.pathname}${location.search}`;
 
-        document.addEventListener("mouseover", (e) => {
-            const target = e.target.closest("a, button, input, select, textarea, [role='button']");
-            if (!target || target === hoveredEl) return;
+    const onNavigate = () => {
+      const nextPath = `${location.pathname}${location.search}`;
+      if (nextPath === lastPath) return;
+      track("navigation", { from: lastPath, to: nextPath });
+      track("page_view", { page: nextPath, title: document.title || "" });
+      lastPath = nextPath;
+    };
 
-            // Clear previous timer
-            if (hoverTimer) clearTimeout(hoverTimer);
-            hoveredEl = target;
+    const originalPushState = history.pushState;
+    history.pushState = function pushStatePatched() {
+      originalPushState.apply(this, arguments);
+      onNavigate();
+    };
 
-            hoverTimer = setTimeout(() => {
-                const meta = {
-                    element: target.tagName,
-                    page: location.pathname,
-                    duration: 1,
-                };
-                if (target.id) meta.element_id = target.id;
-                if (target.textContent) meta.text = target.textContent.trim().slice(0, 50);
-                track("hover", meta);
-            }, 1000);
+    const originalReplaceState = history.replaceState;
+    history.replaceState = function replaceStatePatched() {
+      originalReplaceState.apply(this, arguments);
+      onNavigate();
+    };
+
+    window.addEventListener("popstate", onNavigate);
+    window.addEventListener("hashchange", onNavigate);
+  }
+
+  function setupHoverTracking() {
+    let timerId = null;
+    let activeTarget = null;
+    let hoverStartedAt = 0;
+
+    document.addEventListener(
+      "mouseover",
+      (event) => {
+        const target = event.target instanceof Element
+          ? event.target.closest("a,button,input,select,textarea,[role='button']")
+          : null;
+        if (!target || target === activeTarget) return;
+
+        if (timerId) {
+          clearTimeout(timerId);
+        }
+
+        activeTarget = target;
+        hoverStartedAt = Date.now();
+
+        timerId = setTimeout(() => {
+          const durationMs = Date.now() - hoverStartedAt;
+          track("hover", {
+            element: target.tagName,
+            element_id: target.id || null,
+            text: (target.textContent || "").trim().slice(0, 80) || null,
+            duration_ms: durationMs,
+          });
+        }, 1000);
+      },
+      true
+    );
+
+    document.addEventListener(
+      "mouseout",
+      (event) => {
+        const target = event.target instanceof Element
+          ? event.target.closest("a,button,input,select,textarea,[role='button']")
+          : null;
+        if (!target || target !== activeTarget) return;
+        if (timerId) {
+          clearTimeout(timerId);
+          timerId = null;
+        }
+        activeTarget = null;
+      },
+      true
+    );
+  }
+
+  function setupApiCallTracking() {
+    const originalFetch = window.fetch;
+    window.fetch = function fetchPatched(input, init) {
+      const url = typeof input === "string" ? input : input?.url || "";
+      if (!isSupabaseUrl(url)) {
+        track("api_call", {
+          endpoint: String(url).split("?")[0].slice(0, 240),
+          method: String(init?.method || "GET").toUpperCase(),
+        });
+      }
+      return originalFetch.apply(this, arguments);
+    };
+
+    const originalXhrOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function openPatched(method, url) {
+      if (!isSupabaseUrl(url)) {
+        track("api_call", {
+          endpoint: String(url).split("?")[0].slice(0, 240),
+          method: String(method || "GET").toUpperCase(),
+        });
+      }
+      return originalXhrOpen.apply(this, arguments);
+    };
+  }
+
+  function setupRageClickTracking() {
+    const log = [];
+
+    document.addEventListener(
+      "click",
+      (event) => {
+        const target = event.target instanceof Element ? event.target : null;
+        if (!target) return;
+
+        const now = Date.now();
+        while (log.length && now - log[0].time > 1000) {
+          log.shift();
+        }
+
+        log.push({ time: now, target });
+        const sameTargetCount = log.filter((entry) => entry.target === target).length;
+        if (sameTargetCount < 3) return;
+
+        track("rage_click", {
+          element: target.tagName,
+          element_id: target.id || null,
+          element_class: typeof target.className === "string" ? target.className.slice(0, 120) : null,
+          text: (target.textContent || "").trim().slice(0, 80) || null,
+          clicks: sameTargetCount,
+          window_ms: 1000,
         });
 
-        document.addEventListener("mouseout", (e) => {
-            const target = e.target.closest("a, button, input, select, textarea, [role='button']");
-            if (target === hoveredEl) {
-                if (hoverTimer) clearTimeout(hoverTimer);
-                hoveredEl = null;
-            }
-        });
+        log.length = 0;
+      },
+      true
+    );
+  }
+
+  function setupFlushTriggers() {
+    flushTimer = window.setInterval(() => {
+      void flushQueue();
+    }, BATCH_INTERVAL_MS);
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") {
+        if (!flushWithBeacon()) {
+          void flushQueue({ useKeepalive: true, flushAll: true });
+        }
+      }
+    });
+
+    window.addEventListener("pagehide", () => {
+      if (!flushWithBeacon()) {
+        void flushQueue({ useKeepalive: true, flushAll: true });
+      }
+    });
+  }
+
+  function endSession() {
+    if (ended) return;
+    ended = true;
+    track("session_end", { reason: "page_exit" });
+    if (!flushWithBeacon()) {
+      void flushQueue({ useKeepalive: true, flushAll: true });
+    }
+    if (flushTimer) {
+      window.clearInterval(flushTimer);
+      flushTimer = null;
+    }
+  }
+
+  function setupTracking() {
+    setupFlushTriggers();
+    setupClickTracking();
+    setupFormTracking();
+    setupScrollTracking();
+    setupNavigationTracking();
+    setupHoverTracking();
+    setupApiCallTracking();
+    setupRageClickTracking();
+
+    track("session_start", { entry_page: `${location.pathname}${location.search}` });
+    track("page_view", { page: `${location.pathname}${location.search}`, title: document.title || "" });
+
+    window.addEventListener("beforeunload", endSession);
+    window.addEventListener("unload", endSession);
+  }
+
+  async function init() {
+    try {
+      sessionId = await createSessionWithRetry();
+    } catch (error) {
+      console.error("DigiPrint: session initialization failed. Tracking disabled.", error);
+      return;
     }
 
-    // ─── API Call Interception ─────────────────────────────────
-    // Intercepts fetch() and XMLHttpRequest. Excludes Supabase URLs
-    // to prevent recursion.
+    setupTracking();
+  }
 
-    function setupApiCallTracking() {
-        const isSupabaseUrl = (url) => {
-            if (!url) return false;
-            const s = url.toLowerCase();
-            return s.includes("supabase.co") || s.includes("rest/v1") || s.includes("realtime");
-        };
-
-        // Intercept fetch
-        const origFetch = window.fetch;
-        window.fetch = function (input, init) {
-            const url = typeof input === 'string' ? input : input?.url || '';
-            if (!isSupabaseUrl(url)) {
-                track("api_call", {
-                    endpoint: url.split('?')[0].slice(0, 200),
-                    method: (init?.method || 'GET').toUpperCase(),
-                    page: location.pathname,
-                });
-            }
-            return origFetch.apply(this, arguments);
-        };
-
-        // Intercept XMLHttpRequest
-        const origXhrOpen = XMLHttpRequest.prototype.open;
-        XMLHttpRequest.prototype.open = function (method, url) {
-            if (!isSupabaseUrl(url)) {
-                track("api_call", {
-                    endpoint: String(url).split('?')[0].slice(0, 200),
-                    method: (method || 'GET').toUpperCase(),
-                    page: location.pathname,
-                });
-            }
-            return origXhrOpen.apply(this, arguments);
-        };
-    }
-
-    // ─── Rage Click Detection ─────────────────────────────────
-    // 3+ clicks on the same element within 1 second.
-
-    function setupRageClickTracking() {
-        const clickLog = [];
-
-        document.addEventListener("click", (e) => {
-            const now = Date.now();
-            const el = e.target;
-
-            // Remove old clicks (>1 second ago)
-            while (clickLog.length && now - clickLog[0].time > 1000) {
-                clickLog.shift();
-            }
-
-            clickLog.push({ time: now, target: el });
-
-            // Count clicks on the same element
-            const sameElementClicks = clickLog.filter(c => c.target === el).length;
-
-            if (sameElementClicks >= 3) {
-                const meta = {
-                    element: el.tagName,
-                    page: location.pathname,
-                    clicks: sameElementClicks,
-                };
-                if (el.id) meta.element_id = el.id;
-                if (el.textContent) meta.text = el.textContent.trim().slice(0, 50);
-                if (el.className && typeof el.className === 'string') meta.element_class = el.className.slice(0, 80);
-                track("rage_click", meta);
-
-                // Clear log to avoid repeated firing
-                clickLog.length = 0;
-            }
-        });
-    }
-
-    // ─── Start ─────────────────────────────────────────────────
-
-    init();
-
+  void init();
 })();
