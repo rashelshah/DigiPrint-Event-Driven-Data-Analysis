@@ -66,8 +66,9 @@ const Analytics = () => {
                     <p className="text-muted-foreground">Deep dive into event patterns and site behavior</p>
                 </div>
 
-                {/* Event Frequency Chart */}
-                <GlassCard className="mb-8">
+                <div className="grid lg:grid-cols-2 gap-8 mb-8">
+                    {/* Event Frequency Chart */}
+                    <GlassCard>
                     <h2 className="text-2xl font-semibold mb-6">Event Frequency Over Time</h2>
                     {frequency.length > 0 ? (
                         <ResponsiveContainer width="100%" height={300}>
@@ -105,10 +106,10 @@ const Analytics = () => {
                             No event frequency data available yet
                         </div>
                     )}
-                </GlassCard>
+                    </GlassCard>
 
-                {/* Peak Activity Times */}
-                <GlassCard className="mb-8">
+                    {/* Peak Activity Times */}
+                    <GlassCard>
                     <h2 className="text-2xl font-semibold mb-6">Peak Activity Times</h2>
                     {peakTimes.length > 0 ? (
                         <ResponsiveContainer width="100%" height={300}>
@@ -149,7 +150,8 @@ const Analytics = () => {
                                     series: [
                                         {
                                             type: 'bar',
-                                            barWidth: '40%',
+                                            barWidth: '30%',
+                                            barMaxWidth: 35,
                                             itemStyle: {
                                                 borderRadius: [4, 4, 0, 0],
                                                 color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
@@ -189,7 +191,8 @@ const Analytics = () => {
                             No peak activity data available yet
                         </div>
                     )}
-                </GlassCard>
+                    </GlassCard>
+                </div>
 
                 {/* Site Behavior */}
                 <GlassCard>

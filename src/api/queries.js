@@ -278,12 +278,16 @@ export async function fetchEventFrequency() {
     const { data, error } = await supabase
       .from('events')
       .select('event_timestamp')
-      .order('event_timestamp', { ascending: true })
+      .order('event_timestamp', { ascending: false })
       .limit(5000);
     if (error) throw error;
 
+    const sortedData = (data || []).sort(
+      (a, b) => new Date(a.event_timestamp) - new Date(b.event_timestamp)
+    );
+
     const dateCounts = {};
-    (data || []).forEach((row) => {
+    sortedData.forEach((row) => {
       const date = new Date(row.event_timestamp).toLocaleDateString('en-US', {
         month: 'short',
         day: 'numeric',
@@ -306,6 +310,7 @@ export async function fetchPeakActivity() {
     const { data, error } = await supabase
       .from('events')
       .select('event_timestamp')
+      .order('event_timestamp', { ascending: false })
       .limit(6000);
     if (error) throw error;
 
