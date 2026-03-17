@@ -7,7 +7,9 @@ import {
   fetchPeakActivity,
   fetchSiteBehavior,
 } from '../api/queries';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, BarChart, Bar } from 'recharts';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import ReactECharts from 'echarts-for-react';
+import * as echarts from 'echarts/lib/echarts';
 
 const Analytics = () => {
     const [frequency, setFrequency] = useState([]);
@@ -110,19 +112,77 @@ const Analytics = () => {
                     <h2 className="text-2xl font-semibold mb-6">Peak Activity Times</h2>
                     {peakTimes.length > 0 ? (
                         <ResponsiveContainer width="100%" height={300}>
-                            <BarChart data={peakTimes}>
-                                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                                <XAxis dataKey="hour" stroke="#94a3b8" tickFormatter={(hour) => `${hour}:00`} />
-                                <YAxis stroke="#94a3b8" />
-                                <Tooltip
-                                    contentStyle={{
+                            <ReactECharts
+                                option={{
+                                    grid: {
+                                        top: 20,
+                                        right: 20,
+                                        bottom: 20,
+                                        left: 40,
+                                        containLabel: true,
+                                    },
+                                    tooltip: {
+                                        trigger: 'axis',
+                                        axisPointer: { 
+                                            type: 'none'
+                                        },
                                         backgroundColor: '#1e293b',
-                                        border: '1px solid #475569',
-                                        borderRadius: '8px',
-                                    }}
-                                />
-                                <Bar dataKey="event_count" fill="#00bfff" radius={[8, 8, 0, 0]} />
-                            </BarChart>
+                                        borderColor: '#475569',
+                                        textStyle: { color: '#f8fafc' },
+                                    },
+                                    xAxis: {
+                                        type: 'category',
+                                        data: peakTimes.map(d => `${d.hour}:00`),
+                                        axisLabel: { inside: true, color: '#fff' },
+                                        axisTick: { show: false },
+                                        axisLine: { show: false },
+                                        z: 10,
+                                    },
+                                    yAxis: {
+                                        type: 'value',
+                                        axisLine: { show: false },
+                                        axisTick: { show: false },
+                                        axisLabel: { color: '#94a3b8' },
+                                        splitLine: { lineStyle: { color: '#334155', type: 'dashed' } },
+                                    },
+                                    dataZoom: [{ type: 'inside' }],
+                                    series: [
+                                        {
+                                            type: 'bar',
+                                            barWidth: '40%',
+                                            itemStyle: {
+                                                borderRadius: [4, 4, 0, 0],
+                                                color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                                                    { offset: 0, color: '#83bff6' },
+                                                    { offset: 0.5, color: '#188df0' },
+                                                    { offset: 1, color: '#188df0' }
+                                                ])
+                                            },
+                                            emphasis: {
+                                                itemStyle: {
+                                                    color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                                                        { offset: 0, color: '#2378f7' },
+                                                        { offset: 0.7, color: '#2378f7' },
+                                                        { offset: 1, color: '#83bff6' }
+                                                    ])
+                                                }
+                                            },
+                                            data: peakTimes.map(d => d.event_count)
+                                        }
+                                    ]
+                                }}
+                                style={{ height: '300px', width: '100%' }}
+                                onEvents={{
+                                    click: (params, instance) => {
+                                        const zoomSize = 6;
+                                        instance.dispatchAction({
+                                            type: 'dataZoom',
+                                            startValue: Math.max(params.dataIndex - zoomSize / 2, 0),
+                                            endValue: Math.min(params.dataIndex + zoomSize / 2, peakTimes.length - 1)
+                                        });
+                                    }
+                                }}
+                            />
                         </ResponsiveContainer>
                     ) : (
                         <div className="flex items-center justify-center h-64 text-muted-foreground">
