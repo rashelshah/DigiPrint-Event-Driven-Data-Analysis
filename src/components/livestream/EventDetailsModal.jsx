@@ -63,13 +63,31 @@ const EventDetailsModal = ({ event, onClose }) => {
                   }
                 />
                 <DetailRow
-                  label="Timestamp"
+                  label="Client Time (User Time)"
+                  value={
+                    event.metadata?.client_timestamp
+                      ? new Date(event.metadata.client_timestamp).toLocaleString()
+                      : (event.event_timestamp ? new Date(typeof event.event_timestamp === 'string' && !event.event_timestamp.endsWith('Z') ? event.event_timestamp + 'Z' : event.event_timestamp).toLocaleString() : '—')
+                  }
+                />
+                <DetailRow
+                  label="Server Time (DB)"
                   value={
                     event.event_timestamp
-                      ? new Date(event.event_timestamp).toLocaleString()
+                      ? new Date(typeof event.event_timestamp === 'string' && !event.event_timestamp.endsWith('Z') ? event.event_timestamp + 'Z' : event.event_timestamp).toLocaleString()
                       : '—'
                   }
                 />
+                {event.metadata?.client_timestamp && event.event_timestamp && (
+                  <DetailRow
+                    label="Network Latency"
+                    value={
+                      <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-cyan-500/20 text-cyan-400 border border-cyan-500/30">
+                         {Math.abs(new Date(typeof event.event_timestamp === 'string' && !event.event_timestamp.endsWith('Z') ? event.event_timestamp + 'Z' : event.event_timestamp).getTime() - new Date(event.metadata.client_timestamp).getTime())}ms
+                      </span>
+                    }
+                  />
+                )}
                 <DetailRow
                   label="Session ID"
                   value={

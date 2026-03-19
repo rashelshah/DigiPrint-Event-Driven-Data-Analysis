@@ -94,7 +94,7 @@ const TrackingScriptGenerator = ({ onSiteRegistered, onStartMonitoring }) => {
       const site = await createOrFetchUserSite(domain);
       setSiteRecord(site);
 
-      const trackerUrl = `${window.location.origin}/tracker.js`;
+      const trackerUrl = `${window.location.origin}/tracker.js?v=2`;
       const snippet = `<script\n  src="${trackerUrl}"\n  data-site-id="${site.id}"\n  data-supabase-url="${SUPABASE_URL}"\n  data-supabase-key="${SUPABASE_ANON_KEY}">\n</script>`;
       setScript(snippet);
       onSiteRegistered?.();

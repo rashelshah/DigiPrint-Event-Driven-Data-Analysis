@@ -97,7 +97,10 @@
       site_id: siteId,
       session_id: sessionId,
       event_type: type,
-      metadata: mergedMetadata,
+      metadata: {
+        ...mergedMetadata,
+        client_timestamp: new Date().toISOString()
+      }
     });
 
     if (eventQueue.length >= MAX_BATCH_SIZE) {

@@ -169,7 +169,8 @@ const getEventDescription = (event) => {
 
 const formatTime = (ts) => {
   if (!ts) return '';
-  return new Date(ts).toLocaleTimeString('en-US', {
+  const dateStr = typeof ts === 'string' && !ts.endsWith('Z') && !ts.includes('+') ? ts + 'Z' : ts;
+  return new Date(dateStr).toLocaleTimeString('en-US', {
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
@@ -251,7 +252,7 @@ const LiveEventFeed = ({ events = [], highlightIds = new Set(), onSelectEvent })
                       {(event.event_type || '').replace(/_/g, ' ').toUpperCase()}
                     </span>
                     <span className="text-muted-foreground text-xs font-mono">
-                      {formatTime(event.event_timestamp)}
+                      {formatTime(event.metadata?.client_timestamp || event.event_timestamp)}
                     </span>
                   </div>
 

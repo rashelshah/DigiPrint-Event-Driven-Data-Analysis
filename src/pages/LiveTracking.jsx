@@ -50,10 +50,20 @@ const LiveTracking = () => {
   const [highlightIds, setHighlightIds] = useState(new Set());
   const [selectedEvent, setSelectedEvent] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [isPaused, setIsPaused] = useState(false);
+  const [isPaused, setIsPaused] = useState(() => {
+    return localStorage.getItem("live_paused") === "true";
+  });
   const [error, setError] = useState(null);
   const [realtimeStatus, setRealtimeStatus] = useState('IDLE');
   const [pollingHealthy, setPollingHealthy] = useState(true);
+
+  const togglePause = useCallback(() => {
+    setIsPaused((prev) => {
+      const newState = !prev;
+      localStorage.setItem("live_paused", String(newState));
+      return newState;
+    });
+  }, []);
 
   const channelRef = useRef(null);
   const pollTimerRef = useRef(null);
@@ -80,7 +90,8 @@ const LiveTracking = () => {
     (timestamp) => {
       if (!timeRange || !timestamp) return true;
       const cutoff = Date.now() - timeRange * 60 * 1000;
-      return new Date(timestamp).getTime() >= cutoff;
+      const tsStr = typeof timestamp === 'string' && !timestamp.endsWith('Z') && !timestamp.includes('+') ? timestamp + 'Z' : timestamp;
+      return new Date(tsStr).getTime() >= cutoff;
     },
     [timeRange]
   );
@@ -89,7 +100,8 @@ const LiveTracking = () => {
     (event) => {
       if (!event) return false;
       if (eventTypeFilter !== 'all' && event.event_type !== eventTypeFilter) return false;
-      if (!isWithinRange(event.event_timestamp)) return false;
+      const time = event.metadata?.client_timestamp || event.event_timestamp;
+      if (!isWithinRange(time)) return false;
       return true;
     },
     [eventTypeFilter, isWithinRange]
@@ -115,20 +127,28 @@ const LiveTracking = () => {
       const seen = new Set();
 
       merged.forEach((row) => {
-        const key = row.event_id || row.id || `${row.session_id}-${row.event_timestamp}-${row.event_type}`;
+        const time = row.metadata?.client_timestamp || row.event_timestamp;
+        const key = row.event_id || row.id || `${row.session_id}-${time}-${row.event_type}`;
         if (seen.has(key)) return;
         seen.add(key);
         deduped.push(row);
       });
 
-      deduped.sort((a, b) => new Date(b.event_timestamp) - new Date(a.event_timestamp));
+      deduped.sort((a, b) => {
+        const timeA = a.metadata?.client_timestamp || a.event_timestamp;
+        const timeB = b.metadata?.client_timestamp || b.event_timestamp;
+        const dateA = typeof timeA === 'string' && !timeA.endsWith('Z') && !timeA.includes('+') ? new Date(timeA + 'Z') : new Date(timeA);
+        const dateB = typeof timeB === 'string' && !timeB.endsWith('Z') && !timeB.includes('+') ? new Date(timeB + 'Z') : new Date(timeB);
+        return dateB - dateA;
+      });
       const trimmed = deduped.slice(0, LIVE_LIMIT);
 
       eventIdSetRef.current = new Set(trimmed.map((row) => row.event_id || row.id).filter(Boolean));
-      const newest = trimmed[0]?.event_timestamp;
+      const newest = trimmed[0]?.metadata?.client_timestamp || trimmed[0]?.event_timestamp;
       if (newest) {
         lastTimestampRef.current = newest;
-        lastTimestampIndiaRef.current = new Date(newest).toLocaleString('en-GB', { timeZone: 'Asia/Kolkata' });
+        const newestStr = typeof newest === 'string' && !newest.endsWith('Z') && !newest.includes('+') ? newest + 'Z' : newest;
+        lastTimestampIndiaRef.current = new Date(newestStr).toLocaleString('en-GB', { timeZone: 'Asia/Kolkata' });
       }
       return trimmed;
     });
@@ -181,10 +201,11 @@ const LiveTracking = () => {
 
       setEvents(data);
       eventIdSetRef.current = new Set(data.map((row) => row.event_id || row.id).filter(Boolean));
-      const newest = data[0]?.event_timestamp;
+      const newest = data[0]?.metadata?.client_timestamp || data[0]?.event_timestamp;
       lastTimestampRef.current = newest || new Date().toISOString();
+      const newestStr = typeof newest === 'string' && !newest.endsWith('Z') && !newest.includes('+') ? newest + 'Z' : newest;
       lastTimestampIndiaRef.current = newest
-        ? new Date(newest).toLocaleString('en-GB', { timeZone: 'Asia/Kolkata' })
+        ? new Date(newestStr).toLocaleString('en-GB', { timeZone: 'Asia/Kolkata' })
         : getIndiaNowIso();
       setError(null);
     } catch (err) {
@@ -363,7 +384,7 @@ const LiveTracking = () => {
 
         <div className="flex flex-wrap items-center gap-3 mb-4">
           <button
-            onClick={() => setIsPaused((prev) => !prev)}
+            onClick={togglePause}
             className={`px-4 py-2 rounded-lg text-sm font-medium transition-all active:scale-95 ${
               isPaused
                 ? 'bg-green-500/20 text-green-400 border border-green-500/50 hover:bg-green-500/30'
