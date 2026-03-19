@@ -948,3 +948,113 @@ export function exportRowsAsCsv(rows, filename = 'digiprint-export.csv') {
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
 }
+
+// ---------------------------------------------------------------------------
+// SQL Playground – whitelisted query registry + execution
+// ---------------------------------------------------------------------------
+
+import { api } from '../services/api';
+
+/**
+ * Centralized registry of all playground queries for the UI.
+ * The actual SQL and execution happens securely on the backend.
+ */
+export const PLAYGROUND_QUERIES = [
+  {
+    id: 'total_events',
+    name: 'Total Events Count',
+    description: 'Get the total number of events tracked across your sites',
+    type: 'aggregate',
+    emptyMessage: 'No events tracked yet for your sites.',
+  },
+  {
+    id: 'events_by_type',
+    name: 'Events by Type',
+    description: 'Count of events grouped by event type',
+    type: 'distribution',
+    emptyMessage: 'No event type data available yet.',
+  },
+  {
+    id: 'active_users',
+    name: 'Active Users (Last 7 Days)',
+    description: 'Users with activity in the past 7 days',
+    type: 'users',
+    emptyMessage: 'No active users found in the last 7 days.',
+  },
+  {
+    id: 'avg_session_duration',
+    name: 'Average Session Duration',
+    description: 'Average session duration by user across your sites',
+    type: 'aggregate',
+    emptyMessage: 'No session duration data available.',
+  },
+  {
+    id: 'hourly_distribution',
+    name: 'Hourly Event Distribution',
+    description: 'Events grouped by hour of day',
+    type: 'timeseries',
+    emptyMessage: 'No hourly distribution data available.',
+  },
+  {
+    id: 'user_event_summary',
+    name: 'User Event Summary',
+    description: 'Comprehensive user activity statistics',
+    type: 'summary',
+    emptyMessage: 'No user event summary data found.',
+  },
+  {
+    id: 'anomalies',
+    name: 'Recent Anomalies',
+    description: 'Sessions flagged as anomalous (z-score > 2)',
+    type: 'security',
+    emptyMessage: 'No anomalies detected. Your sites look healthy! ✅',
+  },
+  {
+    id: 'risk_scores',
+    name: 'Risk Score Distribution',
+    description: 'Count of sessions by risk level',
+    type: 'security',
+    emptyMessage: 'No risk score data available.',
+  },
+  {
+    id: 'peak_activity',
+    name: 'Peak Activity Hours',
+    description: 'Busiest hours of day on your sites',
+    type: 'timeseries',
+    emptyMessage: 'No peak activity data yet.',
+  },
+];
+
+/**
+ * Execute a whitelisted playground query securely via the backend API.
+ * User isolation is enforced by the backend using the inferred JWT.
+ *
+ * @param {string}   queryId  - key from PLAYGROUND_QUERIES
+ * @returns {{ rows: object[], executionMs: number, rowCount: number }}
+ */
+export async function executePlaygroundQuery(queryId) {
+  const meta = PLAYGROUND_QUERIES.find((q) => q.id === queryId);
+  if (!meta) throw new Error(`Query "${queryId}" is not in the UI whitelist.`);
+
+  const start = Date.now();
+  
+  try {
+    const { data } = await api.post('/queries/execute', { query_id: queryId });
+    
+    if (!data.success) {
+      throw new Error(data.error || 'Server returned an error');
+    }
+    
+    const rows = data.rows || [];
+    return {
+      rows: rows,
+      executionMs: data.executionMs !== undefined ? data.executionMs : (Date.now() - start),
+      rowCount: rows.length,
+    };
+  } catch (err) {
+    const message = err.response?.data?.error || err.message || 'Failed to execute query';
+    throw new Error(message);
+  }
+}
+
+

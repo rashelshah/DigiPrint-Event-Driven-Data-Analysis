@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { supabase } from '../api/supabaseClient';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 
@@ -12,7 +13,15 @@ const apiClient = axios.create({
 
 // Request interceptor
 apiClient.interceptors.request.use(
-    (config) => {
+    async (config) => {
+        try {
+            const { data: { session } } = await supabase.auth.getSession();
+            if (session?.access_token) {
+                config.headers.Authorization = `Bearer ${session.access_token}`;
+            }
+        } catch (e) {
+            console.warn('Failed to get session token for API request');
+        }
         console.log(`🌐 API Request: ${config.method.toUpperCase()} ${config.url}`);
         return config;
     },
