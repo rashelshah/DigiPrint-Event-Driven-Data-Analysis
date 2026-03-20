@@ -1017,6 +1017,194 @@ export function exportRowsAsCsv(rows, filename = 'digiprint-export.csv') {
 }
 
 // ---------------------------------------------------------------------------
+// Anomaly Detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Classify z-score into a named severity tier.
+ * @param {number} z
+ * @returns {'CRITICAL'|'HIGH'|'MEDIUM'|'NORMAL'}
+ */
+export function getSeverity(z) {
+  if (z > 2.5) return 'CRITICAL';
+  if (z > 2.0) return 'HIGH';
+  if (z > 1.5) return 'MEDIUM';
+  return 'NORMAL';
+}
+
+/**
+ * Fetch statistical anomalies from v_anomalies, enrich them with site context,
+ * and return rows sorted by z_score_events DESC.
+ *
+ * Enrichment pipeline:
+ *   1. Query v_anomalies WHERE z_score_events > minZ
+ *   2. Batch-fetch sessions for those session_ids → get site_id
+ *   3. Filter to user's siteIds
+ *   4. Lookup site_name from cached sites list
+ *   5. Compute severity, ratio, deviation
+ *
+ * @param {string[]} siteIds    - User-owned site IDs (for isolation)
+ * @param {number}   [minZ=1.5] - Minimum z-score threshold
+ * @param {number}   [limit=100]
+ * @returns {Array<{
+ *   session_id: string,
+ *   site_id: string,
+ *   site_name: string,
+ *   event_count: number,
+ *   z_score: number,
+ *   severity: string,
+ *   deviation: number,
+ *   ratio: number,
+ *   mean_events: number,
+ * }>}
+ */
+export async function fetchAnomalies(siteIds, minZ = 1.5, limit = 100) {
+  if (!Array.isArray(siteIds) || siteIds.length === 0) return [];
+
+  try {
+    // Step 1: Pull anomalous sessions from the statistical view.
+    // v_anomalies is a global aggregate view — no site_id column.
+    const { data: anomalyRows, error: anomalyErr } = await supabase
+      .from('v_anomalies')
+      .select('session_id, event_count, z_score_events')
+      .gt('z_score_events', minZ)
+      .order('z_score_events', { ascending: false })
+      .limit(limit);
+
+    if (anomalyErr) throw anomalyErr;
+    if (!anomalyRows || anomalyRows.length === 0) return [];
+
+    // Compute global mean from the result set for deviation display.
+    const avgCount =
+      anomalyRows.reduce((sum, r) => sum + Number(r.event_count || 0), 0) /
+      anomalyRows.length;
+
+    // Step 2: Resolve site_id for each session_id by querying sessions table.
+    const sessionIds = anomalyRows.map((r) => r.session_id).filter(Boolean);
+    const { data: sessionRows, error: sessionErr } = await supabase
+      .from('sessions')
+      .select('id, site_id')
+      .in('id', sessionIds);
+    if (sessionErr) throw sessionErr;
+
+    // Build session_id → site_id map
+    const sessionSiteMap = new Map();
+    (sessionRows || []).forEach((s) => {
+      sessionSiteMap.set(s.id, s.site_id);
+    });
+
+    // Step 3: Filter to only sessions belonging to the user's sites.
+    const ownedSiteSet = new Set(siteIds);
+    const ownedAnomalies = anomalyRows.filter((r) => {
+      const sid = sessionSiteMap.get(r.session_id);
+      return sid && ownedSiteSet.has(sid);
+    });
+    if (ownedAnomalies.length === 0) return [];
+
+    // Step 4: Fetch site names for the resolved site IDs.
+    const uniqueSiteIds = [...new Set(
+      ownedAnomalies.map((r) => sessionSiteMap.get(r.session_id)).filter(Boolean)
+    )];
+    const { data: siteRows } = await supabase
+      .from('sites')
+      .select('id, site_name')
+      .in('id', uniqueSiteIds);
+
+    const siteNameMap = new Map();
+    (siteRows || []).forEach((s) => siteNameMap.set(s.id, s.site_name));
+
+    // Step 5: Enrich and return final result.
+    return ownedAnomalies.map((r) => {
+      const siteId = sessionSiteMap.get(r.session_id) || '';
+      const z = Math.round(Number(r.z_score_events) * 100) / 100;
+      const eventCount = Number(r.event_count || 0);
+      const ratio = avgCount > 0 ? Math.round((eventCount / avgCount) * 10) / 10 : 1;
+      const deviation = Math.round(eventCount - avgCount);
+      return {
+        session_id: r.session_id || '',
+        site_id: siteId,
+        site_name: siteNameMap.get(siteId) || 'Unknown Site',
+        event_count: eventCount,
+        z_score: z,
+        severity: getSeverity(z),
+        deviation,
+        ratio,
+        mean_events: Math.round(avgCount),
+      };
+    });
+  } catch (err) {
+    console.error('fetchAnomalies error:', err);
+    return [];
+  }
+}
+
+/**
+ * Count anomalous sessions (z_score_events > threshold) per time bucket.
+ * Used to paint the "Anomaly Trend" line chart.
+ *
+ * @param {string[]} siteIds
+ * @param {string}   [range='24h']
+ * @param {number}   [minZ=1.5]
+ * @returns {Array<{ label: string, timestamp: string, count: number }>}
+ */
+export async function fetchAnomalyTrend(siteIds, range = '24h', minZ = 1.5) {
+  if (!Array.isArray(siteIds) || siteIds.length === 0) return [];
+
+  try {
+    // Fetch events for user's sites within range
+    let eventsQuery = supabase
+      .from('events')
+      .select('session_id, event_timestamp')
+      .in('site_id', siteIds)
+      .limit(20000);
+    eventsQuery = applyTimeFilter(eventsQuery, 'event_timestamp', { range });
+    const { data: events, error: eventsErr } = await eventsQuery;
+    if (eventsErr) throw eventsErr;
+
+    // Count events per session within the range
+    const sessionEventCounts = new Map();
+    (events || []).forEach((e) => {
+      if (!e.session_id) return;
+      sessionEventCounts.set(
+        e.session_id,
+        { count: (sessionEventCounts.get(e.session_id)?.count || 0) + 1,
+          firstSeen: sessionEventCounts.get(e.session_id)?.firstSeen || e.event_timestamp }
+      );
+    });
+
+    // Compute mean and stddev across sessions in range
+    const counts = [...sessionEventCounts.values()].map((v) => v.count);
+    if (counts.length === 0) return [];
+    const mean = counts.reduce((a, b) => a + b, 0) / counts.length;
+    const variance = counts.reduce((a, b) => a + (b - mean) ** 2, 0) / counts.length;
+    const stddev = Math.sqrt(variance);
+
+    // Bucket sessions by time using the first event timestamp
+    const buckets = new Map();
+    sessionEventCounts.forEach((v, sessionId) => {
+      const z = stddev > 0 ? (v.count - mean) / stddev : 0;
+      if (z <= minZ) return; // only anomalous
+      const bucket = getTimeBucket(v.firstSeen, range);
+      if (!bucket) return;
+      const cur = buckets.get(bucket.key) || { label: bucket.label, count: 0 };
+      cur.count += 1;
+      buckets.set(bucket.key, cur);
+    });
+
+    return Array.from(buckets.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([timestamp, val]) => ({
+        timestamp,
+        label: val.label,
+        count: val.count,
+      }));
+  } catch (err) {
+    console.error('fetchAnomalyTrend error:', err);
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Data Explorer – whitelisted query registry + execution
 // ---------------------------------------------------------------------------
 
