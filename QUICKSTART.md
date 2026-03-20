@@ -85,7 +85,7 @@ Once running, test these features:
    - Check event frequency timeline
    - See peak activity hours
 
-5. **Query Playground**
+5. **Data Explorer**
    - Execute all 8 predefined SQL queries
    - View results in formatted tables
    - Check execution times

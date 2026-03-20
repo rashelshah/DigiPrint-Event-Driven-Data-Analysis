@@ -1,5 +1,5 @@
 -- ==============================================================================
--- SQL PLAYGROUND MIGRATION
+-- DATA EXPLORER MIGRATION
 -- Execute this entirely inside your Supabase Dashboard -> SQL Editor
 -- ==============================================================================
 
@@ -19,7 +19,7 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 
 -- 2. Ensure all required views exist. 
 -- These views MUST contain a 'site_id' or 'user_id' column to be properly 
--- filtered by the SQL Playground registry.
+-- filtered by the Data Explorer registry.
 
 CREATE OR REPLACE VIEW v_total_events AS
 SELECT site_id, count(id) as total_events

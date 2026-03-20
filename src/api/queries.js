@@ -950,7 +950,7 @@ export function exportRowsAsCsv(rows, filename = 'digiprint-export.csv') {
 }
 
 // ---------------------------------------------------------------------------
-// SQL Playground – whitelisted query registry + execution
+// Data Explorer – whitelisted query registry + execution
 // ---------------------------------------------------------------------------
 
 import { api } from '../services/api';

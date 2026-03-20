@@ -121,7 +121,7 @@ const Landing = () => {
                                     },
                                     {
                                         icon: '🔍',
-                                        title: 'Query Playground',
+                                        title: 'Data Explorer',
                                         description: 'Safe, read-only SQL queries with 8 predefined analytics queries',
                                     },
                                     {
@@ -179,7 +179,7 @@ const Landing = () => {
                     <div className="container relative z-10 mx-auto px-6 text-center">
                         <h2 className="text-4xl font-bold mb-6">Ready to Explore?</h2>
                         <p className="text-xl text-muted-foreground mb-8 max-w-2xl mx-auto">
-                            Dive into the dashboard to see real-time analytics, or explore the SQL playground to
+                            Dive into the dashboard to see real-time analytics, or explore the Data Explorer to
                             understand the database architecture.
                         </p>
                         <div className="flex justify-center gap-4">
@@ -188,9 +188,9 @@ const Landing = () => {
                                     Open Dashboard
                                 </GlowButton>
                             </Link>
-                            <Link to="/query-playground">
+                            <Link to="/data-explorer">
                                 <GlowButton variant="secondary" size="lg">
-                                    SQL Playground
+                                    Data Explorer
                                 </GlowButton>
                             </Link>
                         </div>

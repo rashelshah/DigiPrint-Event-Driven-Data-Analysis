@@ -29,7 +29,7 @@ function formatCell(value) {
 }
 
 // ─── Main Component ───────────────────────────────────────────────────────────
-const QueryPlayground = () => {
+const DataExplorer = () => {
   const [selectedQuery, setSelectedQuery] = useState(null);
   const [results, setResults]             = useState(null);
   const [loading, setLoading]             = useState(false);
@@ -195,7 +195,7 @@ const QueryPlayground = () => {
 
         {/* Header */}
         <div className="mb-8">
-          <h1 className="text-4xl font-bold mb-2">SQL Playground</h1>
+          <h1 className="text-4xl font-bold mb-2">Data Explorer</h1>
           <p className="text-muted-foreground">View predefined, read-only analytics securely via the backend API</p>
 
           <div className="mt-4 p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-xl">
@@ -311,4 +311,4 @@ const QueryPlayground = () => {
   );
 };
 
-export default QueryPlayground;
+export default DataExplorer;

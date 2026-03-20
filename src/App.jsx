@@ -18,7 +18,7 @@ import UserAnalytics from './pages/UserAnalytics';
 import EventReplay from './pages/EventReplay';
 import AnomalyDetection from './pages/AnomalyDetection';
 import ArchitectureViz from './pages/ArchitectureViz';
-import QueryPlayground from './pages/QueryPlayground';
+import DataExplorer from './pages/DataExplorer';
 import Privacy from './pages/Privacy';
 import CaseStudy from './pages/CaseStudy';
 
@@ -66,7 +66,7 @@ function App() {
                 <Route path="/user-analytics" element={<ProtectedRoute><UserAnalytics /></ProtectedRoute>} />
                 <Route path="/event-replay" element={<ProtectedRoute><EventReplay /></ProtectedRoute>} />
                 <Route path="/anomalies" element={<ProtectedRoute><AnomalyDetection /></ProtectedRoute>} />
-                <Route path="/query-playground" element={<ProtectedRoute><QueryPlayground /></ProtectedRoute>} />
+                <Route path="/data-explorer" element={<ProtectedRoute><DataExplorer /></ProtectedRoute>} />
 
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>

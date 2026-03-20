@@ -111,7 +111,7 @@ Frontend will run on `http://localhost:5173`
 - `GET /api/analytics/anomalies` - Anomaly detection
 - `GET /api/analytics/risk-scores` - Risk scoring
 
-### Query Playground
+### Data Explorer
 - `GET /api/queries/predefined` - List safe queries
 - `POST /api/queries/execute` - Execute query
 
@@ -120,7 +120,7 @@ Frontend will run on `http://localhost:5173`
 - Synthetic/consent-based data only
 - IP hashing (no raw IPs stored)
 - Consent status tracking
-- Read-only SQL playground (whitelisted queries)
+- Read-only Data Explorer (whitelisted queries)
 
 ## 📚 Documentation
 

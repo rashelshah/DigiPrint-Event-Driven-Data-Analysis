@@ -28,7 +28,7 @@ const Navigation = () => {
         { path: '/live-tracking', label: 'Live Tracking' },
         { path: '/analytics', label: 'Analytics' },
         { path: '/anomalies', label: 'Anomalies' },
-        { path: '/query-playground', label: 'SQL Playground' },
+        { path: '/data-explorer', label: 'Data Explorer' },
     ];
 
     const isActive = (path) => location.pathname === path;
